@@ -86,6 +86,12 @@ INTERVALO_LEITURA = 10
 # =============================================================================
 # MAPEAMENTO DE REGISTRADORES K30XL
 # =============================================================================
+# IMPORTANTE: Os endereços abaixo são baseados na documentação STEMAC K30XL
+# e nas fotos do manual fornecidas pelo usuário.
+#
+# Estratégia: Fazer uma leitura em bloco de 13 registradores a partir do endereço 0
+# para obter todos os valores de uma vez (mais eficiente).
+# =============================================================================
 
 @dataclass
 class RegistradorModbus:
@@ -97,37 +103,39 @@ class RegistradorModbus:
     tipo: str = "holding"
 
 
-# Registradores do K30XL (baseado na documentação STEMAC)
-REGISTRADORES_K30XL = {
-    # Tensões de Rede
-    "tensao_rede_rs": RegistradorModbus(0, "Tensão Rede R-S", 0.1, "V"),
-    "tensao_rede_st": RegistradorModbus(1, "Tensão Rede S-T", 0.1, "V"),
-    "tensao_rede_tr": RegistradorModbus(2, "Tensão Rede T-R", 0.1, "V"),
-    
-    # Tensão do GMG
-    "tensao_gmg": RegistradorModbus(10, "Tensão GMG", 0.1, "V"),
-    
-    # Corrente
-    "corrente_fase1": RegistradorModbus(20, "Corrente Fase 1", 0.1, "A"),
-    
-    # Frequência
-    "frequencia_gmg": RegistradorModbus(30, "Frequência GMG", 0.1, "Hz"),
-    
-    # Motor
-    "rpm_motor": RegistradorModbus(40, "RPM Motor", 1.0, "RPM"),
-    "temperatura_agua": RegistradorModbus(41, "Temperatura Água", 1.0, "°C"),
-    "tensao_bateria": RegistradorModbus(42, "Tensão Bateria", 0.1, "V"),
-    
-    # Contadores
-    "horas_trabalhadas": RegistradorModbus(50, "Horas Trabalhadas", 0.1, "h"),
-    "numero_partidas": RegistradorModbus(51, "Número de Partidas", 1.0, ""),
-    
-    # Nível de Combustível
-    "nivel_combustivel": RegistradorModbus(60, "Nível Combustível", 1.0, "%"),
-}
+# Registradores K30XL - Leitura em bloco a partir do endereço 0
+# Estes endereços foram identificados nas fotos do manual:
+# - Registros 0-2: Tensões de rede (R-S, S-T, T-R)
+# - Registro 3: Tensão GMG
+# - Registro 4: Corrente Fase 1
+# - Registro 5: Frequência (x0.1)
+# - Registro 6: RPM
+# - Registro 7: Temperatura água
+# - Registro 8: Tensão bateria (x0.1)
+# - Registro 9: Horas trabalhadas
+# - Registro 10: Número de partidas
+# - Registro 11: Nível combustível
+# - Registro 12: Status bits
 
-# Registrador de Status (bits)
-REGISTRADOR_STATUS = 100
+REGISTRADORES_K30XL_BLOCO = [
+    RegistradorModbus(0, "tensao_rede_rs", 1.0, "V"),
+    RegistradorModbus(1, "tensao_rede_st", 1.0, "V"),
+    RegistradorModbus(2, "tensao_rede_tr", 1.0, "V"),
+    RegistradorModbus(3, "tensao_gmg", 1.0, "V"),
+    RegistradorModbus(4, "corrente_fase1", 1.0, "A"),
+    RegistradorModbus(5, "frequencia_gmg", 0.1, "Hz"),
+    RegistradorModbus(6, "rpm_motor", 1.0, "RPM"),
+    RegistradorModbus(7, "temperatura_agua", 1.0, "°C"),
+    RegistradorModbus(8, "tensao_bateria", 0.1, "V"),
+    RegistradorModbus(9, "horas_trabalhadas", 1.0, "h"),
+    RegistradorModbus(10, "numero_partidas", 1.0, ""),
+    RegistradorModbus(11, "nivel_combustivel", 1.0, "%"),
+    RegistradorModbus(12, "status_bits", 1.0, ""),
+]
+
+# Configuração para leitura em bloco
+ENDERECO_INICIAL = 0
+QUANTIDADE_REGISTRADORES = 13  # 13 registradores (0-12)
 
 
 # =============================================================================
@@ -223,39 +231,86 @@ class ConexaoHF:
             self.cliente_conectado = False
             return None
     
-    def ler_registrador(self, endereco: int) -> Optional[int]:
-        """Lê um registrador holding (função 0x03)"""
-        resposta = self.enviar_comando_modbus(0x03, endereco, 1)
+    def ler_bloco_registradores(self, endereco_inicial: int, quantidade: int) -> Optional[list]:
+        """
+        Lê um bloco de registradores holding (função 0x03).
+        Retorna lista de valores inteiros ou None em caso de erro.
+        """
+        resposta = self.enviar_comando_modbus(0x03, endereco_inicial, quantidade)
         
-        if resposta and len(resposta) >= 11:
-            # Resposta Modbus TCP: Header (7 bytes) + Function (1) + Byte Count (1) + Data (2)
-            byte_count = resposta[8]
-            if byte_count == 2:
-                valor = (resposta[9] << 8) | resposta[10]
-                return valor
+        if not resposta:
+            return None
         
-        return None
+        # Resposta Modbus TCP: Header (7 bytes) + Function (1) + Byte Count (1) + Data (N*2)
+        if len(resposta) < 9:
+            self.logger.error(f"Resposta muito curta: {len(resposta)} bytes")
+            return None
+        
+        # Verificar erro Modbus (function code com bit 7 setado)
+        function_code = resposta[7]
+        if function_code & 0x80:
+            error_code = resposta[8] if len(resposta) > 8 else 0
+            self.logger.error(f"Exceção Modbus: FC={function_code:02X}, EC={error_code:02X}")
+            return None
+        
+        byte_count = resposta[8]
+        expected_bytes = quantidade * 2
+        
+        if byte_count != expected_bytes:
+            self.logger.warning(f"Byte count diferente: recebido={byte_count}, esperado={expected_bytes}")
+        
+        # Extrair valores (big-endian unsigned 16-bit)
+        valores = []
+        dados = resposta[9:9 + byte_count]
+        
+        for i in range(0, len(dados), 2):
+            if i + 1 < len(dados):
+                valor = (dados[i] << 8) | dados[i + 1]
+                valores.append(valor)
+        
+        return valores
     
     def ler_todos_registradores(self) -> Dict[str, Any]:
-        """Lê todos os registradores K30XL"""
+        """
+        Lê todos os registradores K30XL em uma única requisição.
+        Usa leitura em bloco para maior eficiência.
+        """
         dados = {}
         
-        for nome, reg in REGISTRADORES_K30XL.items():
-            valor_raw = self.ler_registrador(reg.endereco)
-            if valor_raw is not None:
-                dados[nome] = valor_raw * reg.fator_escala
-                self.logger.debug(f"{reg.nome}: {dados[nome]} {reg.unidade}")
+        # Leitura em bloco: 13 registradores a partir do endereço 0
+        valores = self.ler_bloco_registradores(ENDERECO_INICIAL, QUANTIDADE_REGISTRADORES)
         
-        # Lê status bits
-        status_raw = self.ler_registrador(REGISTRADOR_STATUS)
-        if status_raw is not None:
-            dados.update({
-                "motor_funcionando": bool(status_raw & 0x0001),
-                "rede_ok": bool(status_raw & 0x0002),
-                "gmg_alimentando": bool(status_raw & 0x0004),
-                "aviso_ativo": bool(status_raw & 0x0008),
-                "falha_ativa": bool(status_raw & 0x0010),
-            })
+        if not valores:
+            self.logger.error("Falha na leitura do bloco de registradores")
+            return dados
+        
+        self.logger.info(f"Bloco lido com sucesso: {len(valores)} registradores")
+        
+        # Mapear valores para os campos
+        for i, reg in enumerate(REGISTRADORES_K30XL_BLOCO):
+            if i < len(valores):
+                valor_raw = valores[i]
+                valor = valor_raw * reg.fator_escala
+                
+                # Status bits são tratados separadamente
+                if reg.nome == "status_bits":
+                    dados.update({
+                        "motor_funcionando": bool(valor_raw & 0x0001),
+                        "rede_ok": bool(valor_raw & 0x0002),
+                        "gmg_alimentando": bool(valor_raw & 0x0004),
+                        "aviso_ativo": bool(valor_raw & 0x0008),
+                        "falha_ativa": bool(valor_raw & 0x0010),
+                    })
+                    self.logger.debug(f"Status bits: 0x{valor_raw:04X}")
+                else:
+                    dados[reg.nome] = valor
+                    self.logger.debug(f"[{reg.endereco:02d}] {reg.nome}: {valor} {reg.unidade}")
+        
+        # Log resumido dos valores principais
+        self.logger.info(f"  Horímetro: {dados.get('horas_trabalhadas', 'N/A')} h")
+        self.logger.info(f"  Partidas: {dados.get('numero_partidas', 'N/A')}")
+        self.logger.info(f"  Bateria: {dados.get('tensao_bateria', 'N/A')} V")
+        self.logger.info(f"  Rede R-S: {dados.get('tensao_rede_rs', 'N/A')} V")
         
         return dados
     
