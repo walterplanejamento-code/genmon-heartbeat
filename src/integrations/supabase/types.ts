@@ -67,47 +67,65 @@ export type Database = {
       }
       equipamentos_hf: {
         Row: {
+          baud_rate: number | null
           created_at: string
+          data_bits: number | null
           endereco_modbus: string | null
           gerador_id: string
           id: string
           ip_hf: string | null
           ip_vps: string | null
+          last_connection_ip: string | null
+          last_connection_port: number | null
           modelo: string
+          parity: string | null
           porta_serial: string | null
           porta_tcp_local: string | null
           porta_vps: string | null
           status: string | null
+          stop_bits: number | null
           timeout_ms: number | null
           updated_at: string
         }
         Insert: {
+          baud_rate?: number | null
           created_at?: string
+          data_bits?: number | null
           endereco_modbus?: string | null
           gerador_id: string
           id?: string
           ip_hf?: string | null
           ip_vps?: string | null
+          last_connection_ip?: string | null
+          last_connection_port?: number | null
           modelo?: string
+          parity?: string | null
           porta_serial?: string | null
           porta_tcp_local?: string | null
           porta_vps?: string | null
           status?: string | null
+          stop_bits?: number | null
           timeout_ms?: number | null
           updated_at?: string
         }
         Update: {
+          baud_rate?: number | null
           created_at?: string
+          data_bits?: number | null
           endereco_modbus?: string | null
           gerador_id?: string
           id?: string
           ip_hf?: string | null
           ip_vps?: string | null
+          last_connection_ip?: string | null
+          last_connection_port?: number | null
           modelo?: string
+          parity?: string | null
           porta_serial?: string | null
           porta_tcp_local?: string | null
           porta_vps?: string | null
           status?: string | null
+          stop_bits?: number | null
           timeout_ms?: number | null
           updated_at?: string
         }
