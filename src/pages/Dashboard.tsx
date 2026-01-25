@@ -2,6 +2,11 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { MetricCard } from "@/components/ui/MetricCard";
 import { StatusIndicator } from "@/components/ui/StatusIndicator";
 import { AlertBadge } from "@/components/ui/AlertBadge";
+import { useRealtimeReadings, useRealtimeAlerts } from "@/hooks/useRealtimeReadings";
+import { useGenerator } from "@/hooks/useGenerator";
+import { useAuth } from "@/hooks/useAuth";
+import { useNavigate } from "react-router-dom";
+import { useEffect } from "react";
 import {
   Zap,
   Thermometer,
@@ -11,34 +16,55 @@ import {
   Fuel,
   Activity,
   RotateCw,
+  Loader2,
 } from "lucide-react";
 
-// Simulated real-time data - will be replaced with actual Modbus data
-const mockData = {
-  generatorStatus: "online" as const,
-  networkStatus: true,
-  gmgFeeding: true,
-  motorRunning: true,
-  warningActive: false,
-  failureActive: false,
-  readings: {
-    tensaoRedeRS: 380,
-    tensaoRedeST: 382,
-    tensaoRedeTR: 379,
-    tensaoGMG: 381,
-    correnteFase1: 45.2,
-    frequenciaGMG: 60.1,
-    rpmMotor: 1800,
-    temperaturaAgua: 78,
-    tensaoBateria: 24.5,
-    horasTrabalhadas: 1250,
-    numeroPartidas: 342,
-    nivelCombustivel: 75,
-  },
-};
-
 export default function Dashboard() {
-  const { readings, generatorStatus } = mockData;
+  const { user, isLoading: authLoading } = useAuth();
+  const navigate = useNavigate();
+  const { generator, isLoading: generatorLoading } = useGenerator();
+  const { latestReading, isConnected } = useRealtimeReadings(generator?.id || null);
+  const { alerts } = useRealtimeAlerts(generator?.id || null);
+
+  useEffect(() => {
+    if (!authLoading && !user) {
+      navigate("/login");
+    }
+  }, [user, authLoading, navigate]);
+
+  if (authLoading || generatorLoading) {
+    return (
+      <DashboardLayout>
+        <div className="flex items-center justify-center h-[60vh]">
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  // Use real data or fallback to mock data for demo
+  const readings = latestReading || {
+    tensao_rede_rs: 380,
+    tensao_rede_st: 382,
+    tensao_rede_tr: 379,
+    tensao_gmg: 381,
+    corrente_fase1: 45.2,
+    frequencia_gmg: 60.1,
+    rpm_motor: 1800,
+    temperatura_agua: 78,
+    tensao_bateria: 24.5,
+    horas_trabalhadas: 1250,
+    numero_partidas: 342,
+    nivel_combustivel: 75,
+    motor_funcionando: true,
+    rede_ok: true,
+    gmg_alimentando: true,
+    aviso_ativo: false,
+    falha_ativa: false,
+    created_at: new Date().toISOString(),
+  };
+
+  const generatorStatus = isConnected && latestReading ? "online" : generator ? "online" : "offline";
 
   return (
     <DashboardLayout>
@@ -53,7 +79,7 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-4">
             <div className="industrial-card py-2 px-4 flex items-center gap-3">
-              <StatusIndicator status={generatorStatus} />
+              <StatusIndicator status={generatorStatus as "online" | "offline"} />
               <div>
                 <p className="text-xs text-muted-foreground">Status</p>
                 <p className="text-sm font-medium text-foreground">
@@ -64,7 +90,9 @@ export default function Dashboard() {
             <div className="industrial-card py-2 px-4">
               <p className="text-xs text-muted-foreground">Última leitura</p>
               <p className="text-sm font-mono text-data-cyan">
-                {new Date().toLocaleTimeString("pt-BR")}
+                {latestReading
+                  ? new Date(latestReading.created_at).toLocaleTimeString("pt-BR")
+                  : new Date().toLocaleTimeString("pt-BR")}
               </p>
             </div>
           </div>
@@ -73,28 +101,28 @@ export default function Dashboard() {
         {/* Status bits */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <div className="industrial-card flex items-center gap-3">
-            <StatusIndicator status={mockData.motorRunning ? "online" : "offline"} size="sm" />
+            <StatusIndicator status={readings.motor_funcionando ? "online" : "offline"} size="sm" />
             <span className="text-sm text-foreground">Motor</span>
           </div>
           <div className="industrial-card flex items-center gap-3">
-            <StatusIndicator status={mockData.networkStatus ? "online" : "offline"} size="sm" />
+            <StatusIndicator status={readings.rede_ok ? "online" : "offline"} size="sm" />
             <span className="text-sm text-foreground">Rede OK</span>
           </div>
           <div className="industrial-card flex items-center gap-3">
-            <StatusIndicator status={mockData.gmgFeeding ? "online" : "offline"} size="sm" />
+            <StatusIndicator status={readings.gmg_alimentando ? "online" : "offline"} size="sm" />
             <span className="text-sm text-foreground">GMG Alimentando</span>
           </div>
           <div className="industrial-card flex items-center gap-3">
-            <StatusIndicator status={mockData.warningActive ? "warning" : "online"} size="sm" />
+            <StatusIndicator status={readings.aviso_ativo ? "warning" : "online"} size="sm" />
             <span className="text-sm text-foreground">Aviso</span>
           </div>
           <div className="industrial-card flex items-center gap-3">
-            <StatusIndicator status={mockData.failureActive ? "error" : "online"} size="sm" />
+            <StatusIndicator status={readings.falha_ativa ? "error" : "online"} size="sm" />
             <span className="text-sm text-foreground">Falha</span>
           </div>
           <div className="industrial-card flex items-center gap-3">
-            <div className="w-3 h-3 rounded-full bg-primary animate-pulse-glow" />
-            <span className="text-sm text-foreground">Modbus OK</span>
+            <div className={`w-3 h-3 rounded-full ${isConnected ? "bg-primary animate-pulse-glow" : "bg-muted-foreground"}`} />
+            <span className="text-sm text-foreground">Realtime</span>
           </div>
         </div>
 
@@ -102,25 +130,25 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <MetricCard
             label="Tensão Rede R-S"
-            value={readings.tensaoRedeRS}
+            value={readings.tensao_rede_rs ?? "-"}
             unit="V"
             icon={<Zap className="w-5 h-5" />}
           />
           <MetricCard
             label="Tensão Rede S-T"
-            value={readings.tensaoRedeST}
+            value={readings.tensao_rede_st ?? "-"}
             unit="V"
             icon={<Zap className="w-5 h-5" />}
           />
           <MetricCard
             label="Tensão Rede T-R"
-            value={readings.tensaoRedeTR}
+            value={readings.tensao_rede_tr ?? "-"}
             unit="V"
             icon={<Zap className="w-5 h-5" />}
           />
           <MetricCard
             label="Tensão GMG"
-            value={readings.tensaoGMG}
+            value={readings.tensao_gmg ?? "-"}
             unit="V"
             icon={<Zap className="w-5 h-5" />}
           />
@@ -129,27 +157,27 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <MetricCard
             label="Corrente Fase 1"
-            value={readings.correnteFase1}
+            value={readings.corrente_fase1 ?? "-"}
             unit="A"
             icon={<Activity className="w-5 h-5" />}
           />
           <MetricCard
             label="Frequência GMG"
-            value={readings.frequenciaGMG}
+            value={readings.frequencia_gmg ?? "-"}
             unit="Hz"
             icon={<Gauge className="w-5 h-5" />}
           />
           <MetricCard
             label="RPM Motor"
-            value={readings.rpmMotor}
+            value={readings.rpm_motor ?? "-"}
             unit="rpm"
             icon={<RotateCw className="w-5 h-5" />}
           />
           <MetricCard
             label="Temperatura Água"
-            value={readings.temperaturaAgua}
+            value={readings.temperatura_agua ?? "-"}
             unit="°C"
-            status={readings.temperaturaAgua > 90 ? "warning" : "normal"}
+            status={(readings.temperatura_agua ?? 0) > 90 ? "warning" : "normal"}
             icon={<Thermometer className="w-5 h-5" />}
           />
         </div>
@@ -157,26 +185,26 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <MetricCard
             label="Tensão Bateria"
-            value={readings.tensaoBateria}
+            value={readings.tensao_bateria ?? "-"}
             unit="V"
             icon={<Battery className="w-5 h-5" />}
           />
           <MetricCard
             label="Horas Trabalhadas"
-            value={readings.horasTrabalhadas.toLocaleString()}
+            value={(readings.horas_trabalhadas ?? 0).toLocaleString()}
             unit="h"
             icon={<Clock className="w-5 h-5" />}
           />
           <MetricCard
             label="Número de Partidas"
-            value={readings.numeroPartidas}
+            value={readings.numero_partidas ?? "-"}
             icon={<RotateCw className="w-5 h-5" />}
           />
           <MetricCard
             label="Nível Combustível"
-            value={readings.nivelCombustivel}
+            value={readings.nivel_combustivel ?? "-"}
             unit="%"
-            status={readings.nivelCombustivel < 20 ? "warning" : "normal"}
+            status={(readings.nivel_combustivel ?? 100) < 20 ? "warning" : "normal"}
             icon={<Fuel className="w-5 h-5" />}
           />
         </div>
@@ -188,18 +216,24 @@ export default function Dashboard() {
               Alertas Ativos
             </h2>
             <div className="space-y-3">
-              <AlertBadge
-                level="info"
-                message="Sistema operando normalmente"
-                timestamp="10:45:23"
-                source="rule"
-              />
-              <AlertBadge
-                level="warning"
-                message="Nível de combustível abaixo de 80%"
-                timestamp="09:30:15"
-                source="ai"
-              />
+              {alerts.length > 0 ? (
+                alerts.map((alert) => (
+                  <AlertBadge
+                    key={alert.id}
+                    level={alert.nivel}
+                    message={alert.mensagem}
+                    timestamp={new Date(alert.created_at).toLocaleTimeString("pt-BR")}
+                    source={alert.origem}
+                  />
+                ))
+              ) : (
+                <AlertBadge
+                  level="info"
+                  message="Sistema operando normalmente"
+                  timestamp={new Date().toLocaleTimeString("pt-BR")}
+                  source="rule"
+                />
+              )}
             </div>
           </div>
 
@@ -210,15 +244,21 @@ export default function Dashboard() {
             <div className="industrial-card space-y-3">
               <div className="flex justify-between">
                 <span className="text-sm text-muted-foreground">Marca</span>
-                <span className="text-sm font-medium text-foreground">MWM</span>
+                <span className="text-sm font-medium text-foreground">
+                  {generator?.marca || "MWM"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-sm text-muted-foreground">Modelo</span>
-                <span className="text-sm font-medium text-foreground">D229-4</span>
+                <span className="text-sm font-medium text-foreground">
+                  {generator?.modelo || "D229-4"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-sm text-muted-foreground">Controlador</span>
-                <span className="text-sm font-medium text-foreground">STEMAC K30XL</span>
+                <span className="text-sm font-medium text-foreground">
+                  {generator?.controlador || "STEMAC K30XL"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-sm text-muted-foreground">Protocolo</span>

@@ -1,25 +1,62 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Zap, Loader2 } from "lucide-react";
+import { useAuth } from "@/hooks/useAuth";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isSignUp, setIsSignUp] = useState(false);
   const navigate = useNavigate();
+  const { signIn, signUp } = useAuth();
+  const { toast } = useToast();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-    
-    // Simulated login - will be replaced with real auth
-    setTimeout(() => {
+
+    try {
+      if (isSignUp) {
+        const { error } = await signUp(email, password);
+        if (error) {
+          toast({
+            title: "Erro ao criar conta",
+            description: error.message,
+            variant: "destructive",
+          });
+        } else {
+          toast({
+            title: "Conta criada!",
+            description: "Você já pode acessar o sistema.",
+          });
+          navigate("/dashboard");
+        }
+      } else {
+        const { error } = await signIn(email, password);
+        if (error) {
+          toast({
+            title: "Erro ao entrar",
+            description: error.message,
+            variant: "destructive",
+          });
+        } else {
+          navigate("/dashboard");
+        }
+      }
+    } catch (err) {
+      toast({
+        title: "Erro",
+        description: "Ocorreu um erro inesperado.",
+        variant: "destructive",
+      });
+    } finally {
       setIsLoading(false);
-      navigate("/dashboard");
-    }, 1000);
+    }
   };
 
   return (
@@ -92,9 +129,11 @@ export default function Login() {
 
           <div className="industrial-card-glow p-6">
             <div className="mb-6">
-              <h2 className="text-xl font-semibold text-foreground">Entrar</h2>
+              <h2 className="text-xl font-semibold text-foreground">
+                {isSignUp ? "Criar Conta" : "Entrar"}
+              </h2>
               <p className="text-sm text-muted-foreground mt-1">
-                Acesse o painel de monitoramento
+                {isSignUp ? "Crie sua conta de administrador" : "Acesse o painel de monitoramento"}
               </p>
             </div>
 
@@ -126,6 +165,7 @@ export default function Login() {
                   onChange={(e) => setPassword(e.target.value)}
                   className="bg-input border-border focus:border-primary focus:ring-primary"
                   required
+                  minLength={6}
                 />
               </div>
 
@@ -137,13 +177,23 @@ export default function Login() {
                 {isLoading ? (
                   <>
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    Entrando...
+                    {isSignUp ? "Criando..." : "Entrando..."}
                   </>
                 ) : (
-                  "Entrar"
+                  isSignUp ? "Criar Conta" : "Entrar"
                 )}
               </Button>
             </form>
+
+            <div className="mt-4 text-center">
+              <button
+                type="button"
+                onClick={() => setIsSignUp(!isSignUp)}
+                className="text-sm text-primary hover:underline"
+              >
+                {isSignUp ? "Já tem conta? Entrar" : "Não tem conta? Criar"}
+              </button>
+            </div>
           </div>
 
           <p className="text-center text-xs text-muted-foreground mt-6">
