@@ -72,8 +72,10 @@ export type Database = {
           gerador_id: string
           id: string
           ip_hf: string | null
+          ip_vps: string | null
           modelo: string
           porta_serial: string | null
+          porta_tcp_local: string | null
           porta_vps: string | null
           status: string | null
           timeout_ms: number | null
@@ -85,8 +87,10 @@ export type Database = {
           gerador_id: string
           id?: string
           ip_hf?: string | null
+          ip_vps?: string | null
           modelo?: string
           porta_serial?: string | null
+          porta_tcp_local?: string | null
           porta_vps?: string | null
           status?: string | null
           timeout_ms?: number | null
@@ -98,8 +102,10 @@ export type Database = {
           gerador_id?: string
           id?: string
           ip_hf?: string | null
+          ip_vps?: string | null
           modelo?: string
           porta_serial?: string | null
+          porta_tcp_local?: string | null
           porta_vps?: string | null
           status?: string | null
           timeout_ms?: number | null
