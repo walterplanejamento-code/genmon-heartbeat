@@ -11,12 +11,17 @@ export default function HFEquipment() {
     modelo: "HF2211",
     // Configuração de destino (VPS)
     ipVPS: "82.25.70.90",
-    portaVPS: "5001", // Porta na VPS que identifica este gerador
+    portaVPS: "15002", // Porta na VPS que identifica este gerador (K30XL)
     // Configuração local do HF
     portaTcpLocal: "502", // Porta TCP local do HF (Modbus TCP)
     portaSerial: "/dev/ttyUSB0",
     enderecoModbus: "001",
     timeout: "1000",
+    // Configuração Serial (para HF2211)
+    baudRate: "9600",
+    dataBits: "8",
+    parity: "None",
+    stopBits: "1",
   });
 
   const [connectionStatus, setConnectionStatus] = useState<"online" | "offline" | "warning">("online");
