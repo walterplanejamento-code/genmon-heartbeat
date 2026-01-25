@@ -185,19 +185,35 @@ class ConexaoHF:
             self.logger.error(f"Erro ao aceitar conexão: {e}")
             return False
     
-    def enviar_comando_modbus(self, funcao: int, endereco: int, quantidade: int) -> Optional[bytes]:
-        """Envia comando Modbus RTU através do socket"""
+    def calcular_crc16(self, dados: bytes) -> int:
+        """
+        Calcula CRC-16 Modbus (polinômio 0xA001).
+        Usado para frames Modbus RTU.
+        """
+        crc = 0xFFFF
+        for byte in dados:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x0001:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc >>= 1
+        return crc
+    
+    def enviar_comando_modbus_rtu(self, funcao: int, endereco: int, quantidade: int) -> Optional[bytes]:
+        """
+        Envia comando Modbus RTU através do socket (modo transparente HF2211).
+        
+        Frame RTU: [Slave Addr (1)] [Function (1)] [Data (N)] [CRC-16 (2)]
+        """
         if not self.cliente_conectado or not self.socket_cliente:
             return None
         
-        # Monta frame Modbus TCP
-        # Transaction ID (2 bytes) + Protocol ID (2 bytes) + Length (2 bytes) + Unit ID (1 byte) + PDU
-        transaction_id = 0x0001
-        protocol_id = 0x0000  # Modbus
-        unit_id = self.config["endereco_modbus"]
+        slave_addr = self.config["endereco_modbus"]
         
-        # PDU: Function code + Start address + Quantity
+        # Monta PDU: Function code + Start address (2 bytes) + Quantity (2 bytes)
         pdu = bytes([
+            slave_addr,
             funcao,
             (endereco >> 8) & 0xFF,
             endereco & 0xFF,
@@ -205,26 +221,22 @@ class ConexaoHF:
             quantidade & 0xFF,
         ])
         
-        length = len(pdu) + 1  # PDU + Unit ID
-        
-        # Monta o frame completo
-        frame = bytes([
-            (transaction_id >> 8) & 0xFF,
-            transaction_id & 0xFF,
-            (protocol_id >> 8) & 0xFF,
-            protocol_id & 0xFF,
-            (length >> 8) & 0xFF,
-            length & 0xFF,
-            unit_id,
-        ]) + pdu
+        # Calcula e adiciona CRC-16 (little-endian)
+        crc = self.calcular_crc16(pdu)
+        frame = pdu + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
         
         try:
+            self.logger.debug(f"TX RTU: {frame.hex(' ').upper()}")
             self.socket_cliente.send(frame)
+            
+            # Aguarda resposta RTU
             resposta = self.socket_cliente.recv(256)
+            self.logger.debug(f"RX RTU: {resposta.hex(' ').upper()}")
+            
             return resposta
             
         except socket.timeout:
-            self.logger.warning("Timeout na comunicação Modbus")
+            self.logger.error("Erro Modbus: timed out")
             return None
         except Exception as e:
             self.logger.error(f"Erro na comunicação: {e}")
@@ -233,35 +245,51 @@ class ConexaoHF:
     
     def ler_bloco_registradores(self, endereco_inicial: int, quantidade: int) -> Optional[list]:
         """
-        Lê um bloco de registradores holding (função 0x03).
+        Lê um bloco de registradores holding (função 0x03) usando Modbus RTU.
         Retorna lista de valores inteiros ou None em caso de erro.
         """
-        resposta = self.enviar_comando_modbus(0x03, endereco_inicial, quantidade)
+        resposta = self.enviar_comando_modbus_rtu(0x03, endereco_inicial, quantidade)
         
         if not resposta:
             return None
         
-        # Resposta Modbus TCP: Header (7 bytes) + Function (1) + Byte Count (1) + Data (N*2)
-        if len(resposta) < 9:
+        # Resposta Modbus RTU: [Slave (1)] [Function (1)] [Byte Count (1)] [Data (N*2)] [CRC (2)]
+        # Mínimo: 1 + 1 + 1 + 2 + 2 = 7 bytes para 1 registrador
+        min_len = 5 + (quantidade * 2)  # Header (3) + Data + CRC (2)
+        
+        if len(resposta) < 5:
             self.logger.error(f"Resposta muito curta: {len(resposta)} bytes")
             return None
         
+        slave_addr = resposta[0]
+        function_code = resposta[1]
+        
         # Verificar erro Modbus (function code com bit 7 setado)
-        function_code = resposta[7]
         if function_code & 0x80:
-            error_code = resposta[8] if len(resposta) > 8 else 0
-            self.logger.error(f"Exceção Modbus: FC={function_code:02X}, EC={error_code:02X}")
+            error_code = resposta[2] if len(resposta) > 2 else 0
+            self.logger.error(f"Exceção Modbus: FC=0x{function_code:02X}, EC=0x{error_code:02X}")
             return None
         
-        byte_count = resposta[8]
+        byte_count = resposta[2]
         expected_bytes = quantidade * 2
+        
+        self.logger.debug(f"Slave={slave_addr}, FC=0x{function_code:02X}, ByteCount={byte_count}")
         
         if byte_count != expected_bytes:
             self.logger.warning(f"Byte count diferente: recebido={byte_count}, esperado={expected_bytes}")
         
+        # Verificar CRC da resposta
+        dados_sem_crc = resposta[:-2]
+        crc_recebido = resposta[-2] | (resposta[-1] << 8)
+        crc_calculado = self.calcular_crc16(dados_sem_crc)
+        
+        if crc_recebido != crc_calculado:
+            self.logger.warning(f"CRC inválido: recebido=0x{crc_recebido:04X}, calculado=0x{crc_calculado:04X}")
+            # Continua mesmo com CRC errado para debug
+        
         # Extrair valores (big-endian unsigned 16-bit)
         valores = []
-        dados = resposta[9:9 + byte_count]
+        dados = resposta[3:3 + byte_count]
         
         for i in range(0, len(dados), 2):
             if i + 1 < len(dados):
