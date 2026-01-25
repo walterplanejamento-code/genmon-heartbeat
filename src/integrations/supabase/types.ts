@@ -14,7 +14,424 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      alertas: {
+        Row: {
+          created_at: string
+          gerador_id: string
+          id: string
+          leitura_id: string | null
+          mensagem: string
+          nivel: string
+          origem: string
+          resolvido: boolean | null
+          resolvido_em: string | null
+        }
+        Insert: {
+          created_at?: string
+          gerador_id: string
+          id?: string
+          leitura_id?: string | null
+          mensagem: string
+          nivel?: string
+          origem?: string
+          resolvido?: boolean | null
+          resolvido_em?: string | null
+        }
+        Update: {
+          created_at?: string
+          gerador_id?: string
+          id?: string
+          leitura_id?: string | null
+          mensagem?: string
+          nivel?: string
+          origem?: string
+          resolvido?: boolean | null
+          resolvido_em?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "alertas_gerador_id_fkey"
+            columns: ["gerador_id"]
+            isOneToOne: false
+            referencedRelation: "geradores"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "alertas_leitura_id_fkey"
+            columns: ["leitura_id"]
+            isOneToOne: false
+            referencedRelation: "leituras_tempo_real"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      equipamentos_hf: {
+        Row: {
+          created_at: string
+          endereco_modbus: string | null
+          gerador_id: string
+          id: string
+          ip_hf: string | null
+          modelo: string
+          porta_serial: string | null
+          porta_vps: string | null
+          status: string | null
+          timeout_ms: number | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          endereco_modbus?: string | null
+          gerador_id: string
+          id?: string
+          ip_hf?: string | null
+          modelo?: string
+          porta_serial?: string | null
+          porta_vps?: string | null
+          status?: string | null
+          timeout_ms?: number | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          endereco_modbus?: string | null
+          gerador_id?: string
+          id?: string
+          ip_hf?: string | null
+          modelo?: string
+          porta_serial?: string | null
+          porta_vps?: string | null
+          status?: string | null
+          timeout_ms?: number | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "equipamentos_hf_gerador_id_fkey"
+            columns: ["gerador_id"]
+            isOneToOne: false
+            referencedRelation: "geradores"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      geradores: {
+        Row: {
+          combustivel: string | null
+          controlador: string
+          created_at: string
+          frequencia_nominal: string | null
+          id: string
+          instrucoes: string | null
+          marca: string
+          modelo: string
+          potencia_nominal: string | null
+          tensao_nominal: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          combustivel?: string | null
+          controlador?: string
+          created_at?: string
+          frequencia_nominal?: string | null
+          id?: string
+          instrucoes?: string | null
+          marca?: string
+          modelo?: string
+          potencia_nominal?: string | null
+          tensao_nominal?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          combustivel?: string | null
+          controlador?: string
+          created_at?: string
+          frequencia_nominal?: string | null
+          id?: string
+          instrucoes?: string | null
+          marca?: string
+          modelo?: string
+          potencia_nominal?: string | null
+          tensao_nominal?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      leituras_tempo_real: {
+        Row: {
+          aviso_ativo: boolean | null
+          corrente_fase1: number | null
+          created_at: string
+          falha_ativa: boolean | null
+          frequencia_gmg: number | null
+          gerador_id: string
+          gmg_alimentando: boolean | null
+          horas_trabalhadas: number | null
+          id: string
+          motor_funcionando: boolean | null
+          nivel_combustivel: number | null
+          numero_partidas: number | null
+          rede_ok: boolean | null
+          rpm_motor: number | null
+          temperatura_agua: number | null
+          tensao_bateria: number | null
+          tensao_gmg: number | null
+          tensao_rede_rs: number | null
+          tensao_rede_st: number | null
+          tensao_rede_tr: number | null
+        }
+        Insert: {
+          aviso_ativo?: boolean | null
+          corrente_fase1?: number | null
+          created_at?: string
+          falha_ativa?: boolean | null
+          frequencia_gmg?: number | null
+          gerador_id: string
+          gmg_alimentando?: boolean | null
+          horas_trabalhadas?: number | null
+          id?: string
+          motor_funcionando?: boolean | null
+          nivel_combustivel?: number | null
+          numero_partidas?: number | null
+          rede_ok?: boolean | null
+          rpm_motor?: number | null
+          temperatura_agua?: number | null
+          tensao_bateria?: number | null
+          tensao_gmg?: number | null
+          tensao_rede_rs?: number | null
+          tensao_rede_st?: number | null
+          tensao_rede_tr?: number | null
+        }
+        Update: {
+          aviso_ativo?: boolean | null
+          corrente_fase1?: number | null
+          created_at?: string
+          falha_ativa?: boolean | null
+          frequencia_gmg?: number | null
+          gerador_id?: string
+          gmg_alimentando?: boolean | null
+          horas_trabalhadas?: number | null
+          id?: string
+          motor_funcionando?: boolean | null
+          nivel_combustivel?: number | null
+          numero_partidas?: number | null
+          rede_ok?: boolean | null
+          rpm_motor?: number | null
+          temperatura_agua?: number | null
+          tensao_bateria?: number | null
+          tensao_gmg?: number | null
+          tensao_rede_rs?: number | null
+          tensao_rede_st?: number | null
+          tensao_rede_tr?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "leituras_tempo_real_gerador_id_fkey"
+            columns: ["gerador_id"]
+            isOneToOne: false
+            referencedRelation: "geradores"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      manuais_gerador: {
+        Row: {
+          created_at: string
+          gerador_id: string
+          id: string
+          modelo_identificado: string | null
+          nome_arquivo: string
+          tamanho: string | null
+          url: string | null
+        }
+        Insert: {
+          created_at?: string
+          gerador_id: string
+          id?: string
+          modelo_identificado?: string | null
+          nome_arquivo: string
+          tamanho?: string | null
+          url?: string | null
+        }
+        Update: {
+          created_at?: string
+          gerador_id?: string
+          id?: string
+          modelo_identificado?: string | null
+          nome_arquivo?: string
+          tamanho?: string | null
+          url?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "manuais_gerador_gerador_id_fkey"
+            columns: ["gerador_id"]
+            isOneToOne: false
+            referencedRelation: "geradores"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      modbus_registros_k30xl: {
+        Row: {
+          created_at: string
+          descricao: string | null
+          endereco: number
+          fator_escala: number | null
+          id: string
+          nome: string
+          unidade: string | null
+        }
+        Insert: {
+          created_at?: string
+          descricao?: string | null
+          endereco: number
+          fator_escala?: number | null
+          id?: string
+          nome: string
+          unidade?: string | null
+        }
+        Update: {
+          created_at?: string
+          descricao?: string | null
+          endereco?: number
+          fator_escala?: number | null
+          id?: string
+          nome?: string
+          unidade?: string | null
+        }
+        Relationships: []
+      }
+      parametros_alerta: {
+        Row: {
+          created_at: string
+          gerador_id: string
+          habilitado: boolean | null
+          id: string
+          nivel: string
+          parametro: string
+          updated_at: string
+          valor_maximo: number | null
+          valor_minimo: number | null
+        }
+        Insert: {
+          created_at?: string
+          gerador_id: string
+          habilitado?: boolean | null
+          id?: string
+          nivel?: string
+          parametro: string
+          updated_at?: string
+          valor_maximo?: number | null
+          valor_minimo?: number | null
+        }
+        Update: {
+          created_at?: string
+          gerador_id?: string
+          habilitado?: boolean | null
+          id?: string
+          nivel?: string
+          parametro?: string
+          updated_at?: string
+          valor_maximo?: number | null
+          valor_minimo?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "parametros_alerta_gerador_id_fkey"
+            columns: ["gerador_id"]
+            isOneToOne: false
+            referencedRelation: "geradores"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      profiles: {
+        Row: {
+          company: string | null
+          created_at: string
+          email: string | null
+          id: string
+          name: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          company?: string | null
+          created_at?: string
+          email?: string | null
+          id?: string
+          name?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          company?: string | null
+          created_at?: string
+          email?: string | null
+          id?: string
+          name?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      vps_conexoes: {
+        Row: {
+          created_at: string
+          gerador_id: string
+          hostname: string | null
+          id: string
+          ip_fixo: string
+          latencia_ms: number | null
+          porta: string | null
+          provider: string | null
+          ultima_validacao: string | null
+          updated_at: string
+          uptime_percent: number | null
+          validado: boolean | null
+        }
+        Insert: {
+          created_at?: string
+          gerador_id: string
+          hostname?: string | null
+          id?: string
+          ip_fixo: string
+          latencia_ms?: number | null
+          porta?: string | null
+          provider?: string | null
+          ultima_validacao?: string | null
+          updated_at?: string
+          uptime_percent?: number | null
+          validado?: boolean | null
+        }
+        Update: {
+          created_at?: string
+          gerador_id?: string
+          hostname?: string | null
+          id?: string
+          ip_fixo?: string
+          latencia_ms?: number | null
+          porta?: string | null
+          provider?: string | null
+          ultima_validacao?: string | null
+          updated_at?: string
+          uptime_percent?: number | null
+          validado?: boolean | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "vps_conexoes_gerador_id_fkey"
+            columns: ["gerador_id"]
+            isOneToOne: false
+            referencedRelation: "geradores"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
