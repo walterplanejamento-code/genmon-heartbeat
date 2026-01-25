@@ -64,7 +64,7 @@ Deno.serve(async (req) => {
       }
 
       // Find generator by VPS port via equipamentos_hf
-      const { data: equipamentoHF, error: hfError } = await supabase
+      let { data: equipamentoHF, error: hfError } = await supabase
         .from("equipamentos_hf")
         .select("gerador_id, geradores(id, marca, modelo)")
         .eq("porta_vps", reading.porta_vps)
@@ -78,16 +78,70 @@ Deno.serve(async (req) => {
         );
       }
 
+      // Auto-provision generator and HF equipment if not found
       if (!equipamentoHF) {
-        console.error(`No generator found for VPS port: ${reading.porta_vps}`);
-        return new Response(
-          JSON.stringify({ error: `No generator configured for VPS port ${reading.porta_vps}` }),
-          { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        console.log(`Auto-provisioning generator for VPS port: ${reading.porta_vps}`);
+        
+        // Create a system user ID for auto-provisioned generators
+        const systemUserId = "00000000-0000-0000-0000-000000000000";
+        
+        // Create the generator
+        const { data: newGerador, error: geradorError } = await supabase
+          .from("geradores")
+          .insert({
+            user_id: systemUserId,
+            marca: "MWM",
+            modelo: "D229-4",
+            controlador: "STEMAC K30XL",
+            potencia_nominal: "75 kVA",
+            tensao_nominal: "220V",
+            frequencia_nominal: "60Hz",
+            combustivel: "Diesel",
+          })
+          .select()
+          .single();
+
+        if (geradorError) {
+          console.error("Error creating generator:", geradorError);
+          return new Response(
+            JSON.stringify({ error: "Failed to auto-provision generator", details: geradorError }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        console.log(`Created generator: ${newGerador.id}`);
+
+        // Create the HF equipment
+        const { data: newHF, error: hfCreateError } = await supabase
+          .from("equipamentos_hf")
+          .insert({
+            gerador_id: newGerador.id,
+            modelo: "HF2211",
+            porta_vps: reading.porta_vps,
+            ip_vps: "82.25.70.90",
+            porta_tcp_local: "502",
+            endereco_modbus: "001",
+            status: "online",
+          })
+          .select()
+          .single();
+
+        if (hfCreateError) {
+          console.error("Error creating HF equipment:", hfCreateError);
+          return new Response(
+            JSON.stringify({ error: "Failed to create HF equipment", details: hfCreateError }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        console.log(`Created HF equipment: ${newHF.id} for port ${reading.porta_vps}`);
+        
+        // Use the newly created equipment
+        equipamentoHF = { gerador_id: newGerador.id, geradores: newGerador };
       }
 
       const geradorId = equipamentoHF.gerador_id;
-      console.log(`Found generator ${geradorId} for VPS port ${reading.porta_vps}`);
+      console.log(`Using generator ${geradorId} for VPS port ${reading.porta_vps}`);
 
       // Update HF equipment status to online
       await supabase
