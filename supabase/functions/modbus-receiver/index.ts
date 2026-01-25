@@ -6,7 +6,10 @@ const corsHeaders = {
 };
 
 interface ModbusReading {
-  gerador_id: string;
+  // Identificação do gerador pela porta da VPS
+  porta_vps: string;
+  
+  // Leituras Modbus
   tensao_rede_rs?: number;
   tensao_rede_st?: number;
   tensao_rede_tr?: number;
@@ -52,34 +55,51 @@ Deno.serve(async (req) => {
       
       console.log("Received Modbus reading:", JSON.stringify(reading));
 
-      // Validate required field
-      if (!reading.gerador_id) {
+      // Validate required field - porta_vps identifica o gerador
+      if (!reading.porta_vps) {
         return new Response(
-          JSON.stringify({ error: "gerador_id is required" }),
+          JSON.stringify({ error: "porta_vps is required to identify the generator" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
-      // Verify generator exists
-      const { data: gerador, error: geradorError } = await supabase
-        .from("geradores")
-        .select("id")
-        .eq("id", reading.gerador_id)
+      // Find generator by VPS port via equipamentos_hf
+      const { data: equipamentoHF, error: hfError } = await supabase
+        .from("equipamentos_hf")
+        .select("gerador_id, geradores(id, marca, modelo)")
+        .eq("porta_vps", reading.porta_vps)
         .maybeSingle();
 
-      if (geradorError || !gerador) {
-        console.error("Generator not found:", geradorError);
+      if (hfError) {
+        console.error("Error finding HF equipment:", hfError);
         return new Response(
-          JSON.stringify({ error: "Generator not found" }),
+          JSON.stringify({ error: "Database error finding equipment", details: hfError }),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      if (!equipamentoHF) {
+        console.error(`No generator found for VPS port: ${reading.porta_vps}`);
+        return new Response(
+          JSON.stringify({ error: `No generator configured for VPS port ${reading.porta_vps}` }),
           { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
+
+      const geradorId = equipamentoHF.gerador_id;
+      console.log(`Found generator ${geradorId} for VPS port ${reading.porta_vps}`);
+
+      // Update HF equipment status to online
+      await supabase
+        .from("equipamentos_hf")
+        .update({ status: "online", updated_at: new Date().toISOString() })
+        .eq("porta_vps", reading.porta_vps);
 
       // Insert the reading
       const { data: leitura, error: leituraError } = await supabase
         .from("leituras_tempo_real")
         .insert({
-          gerador_id: reading.gerador_id,
+          gerador_id: geradorId,
           tensao_rede_rs: reading.tensao_rede_rs,
           tensao_rede_st: reading.tensao_rede_st,
           tensao_rede_tr: reading.tensao_rede_tr,
@@ -115,7 +135,7 @@ Deno.serve(async (req) => {
       const { data: alertParams, error: alertError } = await supabase
         .from("parametros_alerta")
         .select("*")
-        .eq("gerador_id", reading.gerador_id)
+        .eq("gerador_id", geradorId)
         .eq("habilitado", true);
 
       if (!alertError && alertParams) {
@@ -154,7 +174,7 @@ Deno.serve(async (req) => {
 
             if (alertMessage) {
               alertsToInsert.push({
-                gerador_id: reading.gerador_id,
+                gerador_id: geradorId,
                 leitura_id: leitura.id,
                 nivel: param.nivel,
                 mensagem: alertMessage,
@@ -167,7 +187,7 @@ Deno.serve(async (req) => {
         // Check status bits for alerts
         if (reading.aviso_ativo) {
           alertsToInsert.push({
-            gerador_id: reading.gerador_id,
+            gerador_id: geradorId,
             leitura_id: leitura.id,
             nivel: "warning",
             mensagem: "Aviso ativo no controlador K30XL",
@@ -177,7 +197,7 @@ Deno.serve(async (req) => {
 
         if (reading.falha_ativa) {
           alertsToInsert.push({
-            gerador_id: reading.gerador_id,
+            gerador_id: geradorId,
             leitura_id: leitura.id,
             nivel: "critical",
             mensagem: "Falha ativa no controlador K30XL",
@@ -202,6 +222,7 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({ 
           success: true, 
+          gerador_id: geradorId,
           reading_id: leitura.id,
           timestamp: leitura.created_at 
         }),
@@ -209,22 +230,42 @@ Deno.serve(async (req) => {
       );
     }
 
-    // GET method - return latest reading for a generator
+    // GET method - return latest reading for a generator by VPS port
     if (req.method === "GET") {
       const url = new URL(req.url);
+      const portaVps = url.searchParams.get("porta_vps");
       const geradorId = url.searchParams.get("gerador_id");
 
-      if (!geradorId) {
+      if (!portaVps && !geradorId) {
         return new Response(
-          JSON.stringify({ error: "gerador_id is required" }),
+          JSON.stringify({ error: "porta_vps or gerador_id is required" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
+      }
+
+      let targetGeradorId = geradorId;
+
+      // If porta_vps provided, find the generator
+      if (portaVps && !geradorId) {
+        const { data: equipamentoHF } = await supabase
+          .from("equipamentos_hf")
+          .select("gerador_id")
+          .eq("porta_vps", portaVps)
+          .maybeSingle();
+
+        if (!equipamentoHF) {
+          return new Response(
+            JSON.stringify({ error: `No generator found for VPS port ${portaVps}` }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        targetGeradorId = equipamentoHF.gerador_id;
       }
 
       const { data, error } = await supabase
         .from("leituras_tempo_real")
         .select("*")
-        .eq("gerador_id", geradorId)
+        .eq("gerador_id", targetGeradorId)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
