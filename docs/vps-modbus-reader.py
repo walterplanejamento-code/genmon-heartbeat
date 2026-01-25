@@ -8,6 +8,12 @@ Este script roda na VPS (82.25.70.90) em MODO ATIVO:
 - Os dispositivos HF2211 conectam como TCP Client à VPS
 - A VPS faz polling Modbus através dessas conexões
 
+IMPORTANTE: Configuração do HF2211
+- Baudrate: 19200 (conforme manual STEMAC K30XL)
+- Data bits: 8
+- Paridade: Nenhuma
+- Stop bits: 1
+
 Arquitetura:
     [Gerador] → [K30XL] → [RS-232] → [HF2211] → [Internet] → [VPS:15002] → [Backend]
 
@@ -19,6 +25,7 @@ Uso:
     python vps-modbus-reader.py --teste  # Enviar dados simulados
 
 Autor: Sistema de Monitoramento GMG
+Baseado no Manual STEMAC K30XL versão 1.0 a 3.01
 """
 
 import time
@@ -80,13 +87,41 @@ GERADORES_CONFIG = {
 INTERVALO_LEITURA = 10
 
 # =============================================================================
-# MAPEAMENTO DE REGISTRADORES K30XL
+# MAPEAMENTO DE REGISTRADORES K30XL - MANUAL OFICIAL STEMAC
 # =============================================================================
-# IMPORTANTE: Os endereços abaixo são baseados na documentação STEMAC K30XL
-# e nas fotos do manual fornecidas pelo usuário.
+# 
+# Endereços OFICIAIS do manual K30XL (Tabela Modbus versão 1.0 a 3.01):
+# 
+# End.Manual  End.Protocolo  Parâmetro                 Resolução
+# -------------------------------------------------------------------------
+# 00001       0x0000         Tensão Rede R-S           1 V
+# 00002       0x0001         Tensão Rede S-T           1 V
+# 00003       0x0002         Tensão Rede T-R           1 V
+# 00004       0x0003         Tensão GMG U-V            1 V
+# 00005       0x0004         Corrente Fase 1           1 A
+# 00006       0x0005         Frequência GMG            0.1 Hz
+# 00007       0x0006         RPM Motor                 1 RPM
+# 00008       0x0007         Tensão Bateria            0.1 V
+# 00009       0x0008         Temperatura Água          1 °C
+# 00014-15    0x000D-0x000E  Horas Trabalhadas         1 seg (32-bit!)
+# 00016       0x000F         Partidas Acumuladas       1
+# 00017       0x0010         Status Bits               -
+# 00020       0x0013         Nível Combustível         % (v3.00+)
 #
-# Estratégia: Fazer uma leitura em bloco de 13 registradores a partir do endereço 0
-# para obter todos os valores de uma vez (mais eficiente).
+# ATENÇÃO: O horímetro ocupa 2 registradores (32-bit) = segundos totais
+#          Dividir por 3600 para obter horas
+#
+# Status Bits (Registro 00017 / 0x0010):
+# Bit 0:  Modo Automático
+# Bit 1:  Modo Manual  
+# Bit 2:  Modo Inibido
+# Bit 3:  Rede Alimentando Carga
+# Bit 4:  GMG Alimentando Carga
+# Bit 5:  Aviso Ativo (LED amarelo)
+# Bit 6:  Falha Ativa (LED vermelho)
+# Bit 8:  Motor em Funcionamento
+# Bit 10: Tensão GMG OK
+# Bit 12: Tensão Rede OK
 # =============================================================================
 
 @dataclass
@@ -99,39 +134,31 @@ class RegistradorModbus:
     tipo: str = "holding"
 
 
-# Registradores K30XL - Leitura em bloco a partir do endereço 0
-# Estes endereços foram identificados nas fotos do manual:
-# - Registros 0-2: Tensões de rede (R-S, S-T, T-R)
-# - Registro 3: Tensão GMG
-# - Registro 4: Corrente Fase 1
-# - Registro 5: Frequência (x0.1)
-# - Registro 6: RPM
-# - Registro 7: Temperatura água
-# - Registro 8: Tensão bateria (x0.1)
-# - Registro 9: Horas trabalhadas
-# - Registro 10: Número de partidas
-# - Registro 11: Nível combustível
-# - Registro 12: Status bits
-
-REGISTRADORES_K30XL_BLOCO = [
-    RegistradorModbus(0, "tensao_rede_rs", 1.0, "V"),
-    RegistradorModbus(1, "tensao_rede_st", 1.0, "V"),
-    RegistradorModbus(2, "tensao_rede_tr", 1.0, "V"),
-    RegistradorModbus(3, "tensao_gmg", 1.0, "V"),
-    RegistradorModbus(4, "corrente_fase1", 1.0, "A"),
-    RegistradorModbus(5, "frequencia_gmg", 0.1, "Hz"),
-    RegistradorModbus(6, "rpm_motor", 1.0, "RPM"),
-    RegistradorModbus(7, "temperatura_agua", 1.0, "°C"),
-    RegistradorModbus(8, "tensao_bateria", 0.1, "V"),
-    RegistradorModbus(9, "horas_trabalhadas", 1.0, "h"),
-    RegistradorModbus(10, "numero_partidas", 1.0, ""),
-    RegistradorModbus(11, "nivel_combustivel", 1.0, "%"),
-    RegistradorModbus(12, "status_bits", 1.0, ""),
+# Bloco 1: Registradores 0x0000 a 0x0008 (9 registradores)
+BLOCO1_ENDERECO = 0x0000
+BLOCO1_QUANTIDADE = 9
+BLOCO1_REGISTRADORES = [
+    RegistradorModbus(0x0000, "tensao_rede_rs", 1.0, "V"),
+    RegistradorModbus(0x0001, "tensao_rede_st", 1.0, "V"),
+    RegistradorModbus(0x0002, "tensao_rede_tr", 1.0, "V"),
+    RegistradorModbus(0x0003, "tensao_gmg", 1.0, "V"),
+    RegistradorModbus(0x0004, "corrente_fase1", 1.0, "A"),
+    RegistradorModbus(0x0005, "frequencia_gmg", 0.1, "Hz"),  # 0.1 Hz por bit
+    RegistradorModbus(0x0006, "rpm_motor", 1.0, "RPM"),
+    RegistradorModbus(0x0007, "tensao_bateria", 0.1, "V"),  # 0.1 V por bit
+    RegistradorModbus(0x0008, "temperatura_agua", 1.0, "°C"),
 ]
 
-# Configuração para leitura em bloco
-ENDERECO_INICIAL = 0
-QUANTIDADE_REGISTRADORES = 13  # 13 registradores (0-12)
+# Bloco 2: Registradores 0x000D a 0x0013 (7 registradores)
+# Inclui: Horímetro (32-bit), Partidas, Status, e Combustível
+BLOCO2_ENDERECO = 0x000D
+BLOCO2_QUANTIDADE = 7
+# Estrutura: [0x000D, 0x000E] = Horímetro 32-bit
+#            [0x000F] = Partidas
+#            [0x0010] = Status Bits
+#            [0x0011] = Reservado
+#            [0x0012] = Reservado
+#            [0x0013] = Nível Combustível
 
 
 # =============================================================================
@@ -200,14 +227,14 @@ class ConexaoHF:
         """
         Envia comando Modbus RTU através do socket (modo transparente HF2211).
         
-        Frame RTU: [Slave Addr (1)] [Function (1)] [Data (N)] [CRC-16 (2)]
+        Frame RTU: [Slave Addr (1)] [Function (1)] [Start Addr (2)] [Qty (2)] [CRC-16 (2)]
         """
         if not self.cliente_conectado or not self.socket_cliente:
             return None
         
         slave_addr = self.config["endereco_modbus"]
         
-        # Monta PDU: Function code + Start address (2 bytes) + Quantity (2 bytes)
+        # Monta frame: Slave + FC + Addr(Hi) + Addr(Lo) + Qty(Hi) + Qty(Lo)
         pdu = bytes([
             slave_addr,
             funcao,
@@ -226,6 +253,7 @@ class ConexaoHF:
             self.socket_cliente.send(frame)
             
             # Aguarda resposta RTU
+            time.sleep(0.1)  # Delay para resposta do K30XL
             resposta = self.socket_cliente.recv(256)
             self.logger.debug(f"RX RTU: {resposta.hex(' ').upper()}")
             
@@ -249,10 +277,7 @@ class ConexaoHF:
         if not resposta:
             return None
         
-        # Resposta Modbus RTU: [Slave (1)] [Function (1)] [Byte Count (1)] [Data (N*2)] [CRC (2)]
-        # Mínimo: 1 + 1 + 1 + 2 + 2 = 7 bytes para 1 registrador
-        min_len = 5 + (quantidade * 2)  # Header (3) + Data + CRC (2)
-        
+        # Resposta Modbus RTU: [Slave (1)] [FC (1)] [ByteCount (1)] [Data (N*2)] [CRC (2)]
         if len(resposta) < 5:
             self.logger.error(f"Resposta muito curta: {len(resposta)} bytes")
             return None
@@ -294,47 +319,122 @@ class ConexaoHF:
         
         return valores
     
+    def extrair_status_bits(self, status_word: int) -> Dict[str, bool]:
+        """
+        Extrai os bits de status conforme manual K30XL (registro 00017 / 0x0010)
+        
+        Bit 0:  Modo Automático
+        Bit 1:  Modo Manual  
+        Bit 2:  Modo Inibido
+        Bit 3:  Rede Alimentando Carga
+        Bit 4:  GMG Alimentando Carga
+        Bit 5:  Aviso Ativo (LED amarelo)
+        Bit 6:  Falha Ativa (LED vermelho)
+        Bit 8:  Motor em Funcionamento
+        Bit 10: Tensão GMG OK
+        Bit 12: Tensão Rede OK
+        """
+        return {
+            "modo_automatico": bool(status_word & 0x0001),      # Bit 0
+            "modo_manual": bool(status_word & 0x0002),          # Bit 1
+            "modo_inibido": bool(status_word & 0x0004),         # Bit 2
+            "rede_alimentando": bool(status_word & 0x0008),     # Bit 3
+            "gmg_alimentando": bool(status_word & 0x0010),      # Bit 4
+            "aviso_ativo": bool(status_word & 0x0020),          # Bit 5
+            "falha_ativa": bool(status_word & 0x0040),          # Bit 6
+            "motor_funcionando": bool(status_word & 0x0100),    # Bit 8
+            "tensao_gmg_ok": bool(status_word & 0x0400),        # Bit 10
+            "rede_ok": bool(status_word & 0x1000),              # Bit 12 = Tensão Rede OK
+        }
+    
     def ler_todos_registradores(self) -> Dict[str, Any]:
         """
-        Lê todos os registradores K30XL em uma única requisição.
-        Usa leitura em bloco para maior eficiência.
+        Lê todos os registradores K30XL em duas requisições (blocos).
+        
+        Bloco 1: Endereços 0x0000-0x0008 (9 regs) - Tensões, Corrente, Freq, RPM, Temp
+        Bloco 2: Endereços 0x000D-0x0013 (7 regs) - Horímetro, Partidas, Status, Combustível
         """
         dados = {}
         
-        # Leitura em bloco: 13 registradores a partir do endereço 0
-        valores = self.ler_bloco_registradores(ENDERECO_INICIAL, QUANTIDADE_REGISTRADORES)
+        # =========================================
+        # BLOCO 1: Parâmetros Elétricos e Motor
+        # =========================================
+        self.logger.info("Lendo Bloco 1 (0x0000-0x0008)...")
+        valores_bloco1 = self.ler_bloco_registradores(BLOCO1_ENDERECO, BLOCO1_QUANTIDADE)
         
-        if not valores:
-            self.logger.error("Falha na leitura do bloco de registradores")
+        if not valores_bloco1:
+            self.logger.error("Falha na leitura do Bloco 1")
             return dados
         
-        self.logger.info(f"Bloco lido com sucesso: {len(valores)} registradores")
+        self.logger.info(f"Bloco 1: {len(valores_bloco1)} registradores lidos")
         
-        # Mapear valores para os campos
-        for i, reg in enumerate(REGISTRADORES_K30XL_BLOCO):
-            if i < len(valores):
-                valor_raw = valores[i]
+        # Mapear valores do Bloco 1
+        for i, reg in enumerate(BLOCO1_REGISTRADORES):
+            if i < len(valores_bloco1):
+                valor_raw = valores_bloco1[i]
                 valor = valor_raw * reg.fator_escala
-                
-                # Status bits são tratados separadamente
-                if reg.nome == "status_bits":
-                    dados.update({
-                        "motor_funcionando": bool(valor_raw & 0x0001),
-                        "rede_ok": bool(valor_raw & 0x0002),
-                        "gmg_alimentando": bool(valor_raw & 0x0004),
-                        "aviso_ativo": bool(valor_raw & 0x0008),
-                        "falha_ativa": bool(valor_raw & 0x0010),
-                    })
-                    self.logger.debug(f"Status bits: 0x{valor_raw:04X}")
-                else:
-                    dados[reg.nome] = valor
-                    self.logger.debug(f"[{reg.endereco:02d}] {reg.nome}: {valor} {reg.unidade}")
+                dados[reg.nome] = round(valor, 2) if reg.fator_escala != 1.0 else valor
+                self.logger.debug(f"  [0x{reg.endereco:04X}] {reg.nome}: {dados[reg.nome]} {reg.unidade}")
         
-        # Log resumido dos valores principais
+        # Delay entre leituras (evitar sobrecarga no barramento)
+        time.sleep(0.2)
+        
+        # =========================================
+        # BLOCO 2: Horímetro, Partidas, Status, Combustível
+        # =========================================
+        self.logger.info("Lendo Bloco 2 (0x000D-0x0013)...")
+        valores_bloco2 = self.ler_bloco_registradores(BLOCO2_ENDERECO, BLOCO2_QUANTIDADE)
+        
+        if not valores_bloco2:
+            self.logger.error("Falha na leitura do Bloco 2")
+            # Retorna dados parciais do Bloco 1
+            return dados
+        
+        self.logger.info(f"Bloco 2: {len(valores_bloco2)} registradores lidos")
+        
+        # Processar Bloco 2
+        # Índice 0-1: Horímetro 32-bit (0x000D-0x000E) - segundos
+        if len(valores_bloco2) >= 2:
+            horimetro_segundos = (valores_bloco2[0] << 16) | valores_bloco2[1]
+            horas_trabalhadas = round(horimetro_segundos / 3600.0, 2)
+            dados["horas_trabalhadas"] = horas_trabalhadas
+            self.logger.debug(f"  [0x000D-0E] Horímetro: {horimetro_segundos} seg = {horas_trabalhadas} h")
+        
+        # Índice 2: Partidas (0x000F)
+        if len(valores_bloco2) >= 3:
+            dados["numero_partidas"] = valores_bloco2[2]
+            self.logger.debug(f"  [0x000F] Partidas: {valores_bloco2[2]}")
+        
+        # Índice 3: Status Bits (0x0010)
+        if len(valores_bloco2) >= 4:
+            status_word = valores_bloco2[3]
+            status_bits = self.extrair_status_bits(status_word)
+            dados.update(status_bits)
+            self.logger.debug(f"  [0x0010] Status: 0x{status_word:04X} = {status_bits}")
+        
+        # Índice 6: Nível Combustível (0x0013) - disponível a partir da versão 3.00
+        if len(valores_bloco2) >= 7:
+            dados["nivel_combustivel"] = valores_bloco2[6]
+            self.logger.debug(f"  [0x0013] Combustível: {valores_bloco2[6]}%")
+        
+        # =========================================
+        # LOG RESUMIDO
+        # =========================================
+        self.logger.info("=" * 50)
+        self.logger.info("LEITURA K30XL COMPLETA:")
+        self.logger.info(f"  Tensão Rede R-S: {dados.get('tensao_rede_rs', 'N/A')} V")
+        self.logger.info(f"  Tensão GMG: {dados.get('tensao_gmg', 'N/A')} V")
+        self.logger.info(f"  Frequência: {dados.get('frequencia_gmg', 'N/A')} Hz")
+        self.logger.info(f"  RPM: {dados.get('rpm_motor', 'N/A')}")
+        self.logger.info(f"  Temperatura: {dados.get('temperatura_agua', 'N/A')} °C")
+        self.logger.info(f"  Bateria: {dados.get('tensao_bateria', 'N/A')} V")
         self.logger.info(f"  Horímetro: {dados.get('horas_trabalhadas', 'N/A')} h")
         self.logger.info(f"  Partidas: {dados.get('numero_partidas', 'N/A')}")
-        self.logger.info(f"  Bateria: {dados.get('tensao_bateria', 'N/A')} V")
-        self.logger.info(f"  Rede R-S: {dados.get('tensao_rede_rs', 'N/A')} V")
+        self.logger.info(f"  Combustível: {dados.get('nivel_combustivel', 'N/A')}%")
+        self.logger.info(f"  Motor Ligado: {dados.get('motor_funcionando', 'N/A')}")
+        self.logger.info(f"  Rede OK: {dados.get('rede_ok', 'N/A')}")
+        self.logger.info(f"  GMG Alimentando: {dados.get('gmg_alimentando', 'N/A')}")
+        self.logger.info("=" * 50)
         
         return dados
     
@@ -415,7 +515,7 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
                     continue
             
             # Faz polling dos registradores
-            log.info("Lendo registradores Modbus...")
+            log.info("Lendo registradores Modbus K30XL...")
             dados = conexao.ler_todos_registradores()
             
             if dados:
@@ -446,7 +546,8 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
 def main():
     """Inicia threads para cada gerador habilitado"""
     logger.info("=" * 60)
-    logger.info("VPS Modbus Reader - Modo ATIVO (Polling)")
+    logger.info("VPS Modbus Reader - K30XL (Manual STEMAC)")
+    logger.info("IMPORTANTE: Configure HF2211 com baudrate 19200!")
     logger.info(f"Edge Function: {EDGE_FUNCTION_URL}")
     logger.info("=" * 60)
     
@@ -495,93 +596,106 @@ def main():
 # HEALTH CHECK API
 # =============================================================================
 
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            response = {
+                "status": "ok",
+                "service": "vps-modbus-reader",
+                "version": "2.0.0",
+                "protocol": "Modbus RTU (K30XL Manual)",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            }
+            self.wfile.write(json.dumps(response).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass  # Silencia logs HTTP
+
+
 def iniciar_health_api():
-    """Inicia um servidor HTTP simples para health check"""
-    import http.server
-    import socketserver
-    
-    class HealthHandler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == "/health":
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                
-                status = {
-                    "status": "ok",
-                    "service": "vps-modbus-reader",
-                    "geradores": list(GERADORES_CONFIG.keys()),
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                }
-                self.wfile.write(json.dumps(status).encode())
-            else:
-                self.send_response(404)
-                self.end_headers()
-        
-        def log_message(self, format, *args):
-            pass  # Silencia logs HTTP
-    
-    def run_server():
-        with socketserver.TCPServer(("0.0.0.0", 3001), HealthHandler) as httpd:
-            httpd.serve_forever()
-    
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
+    """Inicia servidor HTTP para health checks"""
+    try:
+        server = HTTPServer(('0.0.0.0', 3001), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info("Health API rodando em http://0.0.0.0:3001/health")
+    except Exception as e:
+        logger.error(f"Erro ao iniciar Health API: {e}")
 
 
 # =============================================================================
-# MODO DE TESTE
+# MODO TESTE (ENVIO SIMULADO)
 # =============================================================================
 
 def testar_envio_simulado():
-    """
-    Testa o envio para o backend com dados simulados do K30XL
-    """
+    """Envia dados simulados para testar a edge function"""
     logger.info("=" * 60)
-    logger.info("MODO DE TESTE - Enviando dados simulados")
+    logger.info("MODO TESTE - Enviando dados simulados K30XL")
     logger.info("=" * 60)
     
-    # Dados simulados de um K30XL em standby (rede OK, motor parado)
+    # Dados simulados baseados no manual K30XL
     dados_simulados = {
-        "tensao_rede_rs": 220.5,
-        "tensao_rede_st": 221.0,
-        "tensao_rede_tr": 219.8,
-        "tensao_gmg": 0.0,
-        "corrente_fase1": 0.0,
-        "frequencia_gmg": 0.0,
-        "rpm_motor": 0,
-        "temperatura_agua": 25,
-        "tensao_bateria": 12.8,
-        "horas_trabalhadas": 1234.5,
-        "numero_partidas": 567,
-        "nivel_combustivel": 85,
-        "motor_funcionando": False,
-        "rede_ok": True,
-        "gmg_alimentando": False,
+        # Bloco 1 - Parâmetros elétricos
+        "tensao_rede_rs": 220,
+        "tensao_rede_st": 218,
+        "tensao_rede_tr": 222,
+        "tensao_gmg": 0,          # Motor parado
+        "corrente_fase1": 0,      # Sem carga
+        "frequencia_gmg": 0.0,    # Motor parado
+        "rpm_motor": 0,           # Motor parado
+        "tensao_bateria": 12.8,   # Bateria OK
+        "temperatura_agua": 25,   # Ambiente
+        
+        # Bloco 2 - Horímetro, partidas, status
+        "horas_trabalhadas": 285.5,   # ~285 horas
+        "numero_partidas": 625,
+        "nivel_combustivel": 78,      # 78%
+        
+        # Status bits
+        "modo_automatico": True,
+        "modo_manual": False,
+        "modo_inibido": False,
+        "rede_alimentando": True,     # Rede alimentando carga
+        "gmg_alimentando": False,     # GMG em standby
         "aviso_ativo": False,
         "falha_ativa": False,
+        "motor_funcionando": False,   # Motor parado
+        "tensao_gmg_ok": False,       # GMG desligado
+        "rede_ok": True,              # Rede presente
     }
     
-    # Usa porta 15002 (K30XL configurado)
-    porta_teste = "15002"
+    logger.info("Dados simulados:")
+    for chave, valor in dados_simulados.items():
+        logger.info(f"  {chave}: {valor}")
     
-    logger.info(f"Enviando para porta VPS: {porta_teste}")
-    logger.info(f"Dados: {json.dumps(dados_simulados, indent=2)}")
-    
-    sucesso = enviar_para_backend(porta_teste, dados_simulados)
+    # Envia para porta 15002 (gerador K30XL)
+    sucesso = enviar_para_backend("15002", dados_simulados)
     
     if sucesso:
-        logger.info("✓ Teste de envio bem-sucedido!")
+        logger.info("✓ Teste concluído com sucesso!")
     else:
-        logger.error("✗ Teste de envio falhou!")
+        logger.error("✗ Falha no teste")
     
     return sucesso
 
 
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+
 if __name__ == "__main__":
     import sys
     
-    if len(sys.argv) > 1 and sys.argv[1] == "--teste":
+    if "--teste" in sys.argv:
         testar_envio_simulado()
     else:
         main()
