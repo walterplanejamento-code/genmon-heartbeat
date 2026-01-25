@@ -12,7 +12,7 @@ Arquitetura:
     [Gerador] → [K30XL] → [RS-232] → [HF2211] → [Internet] → [VPS:15002] → [Backend]
 
 Requisitos:
-    pip install pymodbus requests
+    pip install requests
 
 Uso:
     python vps-modbus-reader.py          # Modo produção
@@ -29,10 +29,6 @@ import threading
 import requests
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from pymodbus.client import ModbusTcpClient
-from pymodbus.server import StartTcpServer
-from pymodbus.framer import ModbusSocketFramer
-from pymodbus.exceptions import ModbusException
 
 # Configuração de logging
 logging.basicConfig(
