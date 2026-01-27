@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.2.0
+Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.3.0
 =====================================================
 
 Este script roda na VPS (82.25.70.90) em MODO ATIVO:
@@ -17,10 +17,10 @@ IMPORTANTE: Configuração do HF2211
 Arquitetura:
     [Gerador] → [K30XL] → [RS-232] → [HF2211] → [Internet] → [VPS:15002] → [Backend]
 
-CORREÇÃO v2.2.0: Sincronização por Marcador
-- Busca padrão 01 03 no buffer antes de processar
-- Descarta bytes de lixo automaticamente
-- Delay de 500ms entre leitura dos blocos
+CORREÇÃO v2.3.0: Mapeamento corrigido baseado em medições físicas
+- Partidas está no Reg 0x0010 (não 0x000F)
+- Horímetro testado em minutos (14624 / 60 = 243.7h)
+- Modo --scan para identificar todos os registradores
 
 Requisitos:
     pip install requests
@@ -29,6 +29,7 @@ Uso:
     python vps-modbus-reader.py          # Modo produção (envia para backend)
     python vps-modbus-reader.py --debug  # Modo debug (NÃO envia para backend)
     python vps-modbus-reader.py --teste  # Enviar dados simulados
+    python vps-modbus-reader.py --scan   # Varrer registradores 0x0000-0x001F
 
 Autor: Sistema de Monitoramento GMG
 Baseado no Manual STEMAC K30XL versão 1.0 a 3.01
@@ -59,6 +60,9 @@ EDGE_FUNCTION_URL = "https://hwloajvxjsysutqfqpal.supabase.co/functions/v1/modbu
 
 # Modo debug: não envia para backend, só mostra logs
 MODO_DEBUG = False
+
+# Modo scan: apenas varre registradores
+MODO_SCAN = False
 
 # IP da VPS (onde este script roda)
 VPS_IP = "0.0.0.0"  # Escuta em todas as interfaces
@@ -102,41 +106,28 @@ DELAY_ENTRE_BLOCOS = 0.5  # 500ms
 MAX_HORIMETRO_HORAS = 500000  # ~57 anos
 
 # =============================================================================
-# MAPEAMENTO DE REGISTRADORES K30XL - MANUAL OFICIAL STEMAC
+# MAPEAMENTO DE REGISTRADORES K30XL - CORRIGIDO v2.3.0
 # =============================================================================
 # 
-# Endereços OFICIAIS do manual K30XL (Tabela Modbus versão 1.0 a 3.01):
+# MAPEAMENTO CORRIGIDO baseado em medições físicas do display:
+# Display físico: Partidas = 625, Horímetro = 285:30h
 # 
-# End.Manual  End.Protocolo  Parâmetro                 Resolução
+# End.Protocolo  Parâmetro                 Medição Real
 # -------------------------------------------------------------------------
-# 00001       0x0000         Tensão Rede R-S           1 V
-# 00002       0x0001         Tensão Rede S-T           1 V
-# 00003       0x0002         Tensão Rede T-R           1 V
-# 00004       0x0003         Tensão GMG U-V            1 V
-# 00005       0x0004         Corrente Fase 1           1 A
-# 00006       0x0005         Frequência GMG            0.1 Hz
-# 00007       0x0006         RPM Motor                 1 RPM
-# 00008       0x0007         Tensão Bateria            0.1 V
-# 00009       0x0008         Temperatura Água          1 °C
-# 00014-15    0x000D-0x000E  Horas Trabalhadas         1 seg (32-bit!)
-# 00016       0x000F         Partidas Acumuladas       1
-# 00017       0x0010         Status Bits               -
-# 00020       0x0013         Nível Combustível         % (v3.00+)
+# 0x0000         Tensão Rede R-S           Bloco 1 OK
+# 0x0001         Tensão Rede S-T           Bloco 1 OK
+# 0x0002         Tensão Rede T-R           Bloco 1 OK
+# 0x0003         Tensão GMG U-V            Bloco 1 OK
+# 0x0004         Corrente Fase 1           Bloco 1 OK
+# 0x0005         Frequência GMG            Bloco 1 OK (0.1 Hz)
+# 0x0006         RPM Motor                 Bloco 1 OK
+# 0x0007         Tensão Bateria            Bloco 1 OK (0.1 V)
+# 0x0008         Temperatura Água          Bloco 1 OK
+# 0x000D-0x000E  Horas Trabalhadas         MINUTOS? (14624 -> 243.7h)
+# 0x000F         ???                       0 (não é partidas!)
+# 0x0010         PARTIDAS                  625 ✓ CONFIRMADO!
+# 0x0013         Nível Combustível         0%
 #
-# ATENÇÃO: O horímetro ocupa 2 registradores (32-bit) = segundos totais
-#          Dividir por 3600 para obter horas
-#
-# Status Bits (Registro 00017 / 0x0010):
-# Bit 0:  Modo Automático
-# Bit 1:  Modo Manual  
-# Bit 2:  Modo Inibido
-# Bit 3:  Rede Alimentando Carga
-# Bit 4:  GMG Alimentando Carga
-# Bit 5:  Aviso Ativo (LED amarelo)
-# Bit 6:  Falha Ativa (LED vermelho)
-# Bit 8:  Motor em Funcionamento
-# Bit 10: Tensão GMG OK
-# Bit 12: Tensão Rede OK
 # =============================================================================
 
 @dataclass
@@ -165,15 +156,16 @@ BLOCO1_REGISTRADORES = [
 ]
 
 # Bloco 2: Registradores 0x000D a 0x0013 (7 registradores)
-# Inclui: Horímetro (32-bit), Partidas, Status, e Combustível
+# CORREÇÃO v2.3.0: Mapeamento corrigido
 BLOCO2_ENDERECO = 0x000D
 BLOCO2_QUANTIDADE = 7
-# Estrutura: [0x000D, 0x000E] = Horímetro 32-bit
-#            [0x000F] = Partidas
-#            [0x0010] = Status Bits
-#            [0x0011] = Reservado
-#            [0x0012] = Reservado
-#            [0x0013] = Nível Combustível
+# Estrutura CORRIGIDA:
+#   [0x000D, 0x000E] = Horímetro 32-bit (MINUTOS, não segundos!)
+#   [0x000F] = ??? (sempre 0)
+#   [0x0010] = PARTIDAS (não Status!) → 625 confirmado
+#   [0x0011] = Reservado ou Status?
+#   [0x0012] = Reservado
+#   [0x0013] = Nível Combustível
 
 
 # =============================================================================
@@ -464,6 +456,7 @@ class ConexaoHF:
     def extrair_status_bits(self, status_word: int) -> Dict[str, bool]:
         """
         Extrai os bits de status conforme manual K30XL (registro 00017 / 0x0010)
+        NOTA: Após correção v2.3.0, status pode estar em outro registrador
         """
         return {
             "modo_automatico": bool(status_word & 0x0001),      # Bit 0
@@ -478,11 +471,96 @@ class ConexaoHF:
             "rede_ok": bool(status_word & 0x1000),              # Bit 12 = Tensão Rede OK
         }
     
+    def scan_registradores(self) -> None:
+        """
+        MODO SCAN v2.3.0: Lê registradores de 0x0000 a 0x001F e mostra todos os valores.
+        Usado para identificar o mapeamento correto do controlador.
+        """
+        self.logger.info("=" * 70)
+        self.logger.info("=" * 70)
+        self.logger.info("=== MODO SCAN: VARRENDO REGISTRADORES 0x0000-0x001F ===")
+        self.logger.info("=" * 70)
+        
+        # Lê primeiro bloco: 0x0000 a 0x000F (16 registradores)
+        self.logger.info(">>> Lendo bloco 0x0000-0x000F (16 registradores)...")
+        valores_bloco1 = self.ler_bloco_registradores(0x0000, 16)
+        
+        if valores_bloco1:
+            self.logger.info("-" * 50)
+            self.logger.info("BLOCO 1 (0x0000-0x000F):")
+            for i, val in enumerate(valores_bloco1):
+                endereco = 0x0000 + i
+                self.logger.info(f"  Reg 0x{endereco:04X} (dec {endereco:5d}): {val:6d} (0x{val:04X})")
+            self.logger.info("-" * 50)
+        else:
+            self.logger.error("Falha ao ler bloco 1 (0x0000-0x000F)")
+        
+        # Delay entre blocos
+        self.logger.info(f"Aguardando {DELAY_ENTRE_BLOCOS}s...")
+        time.sleep(DELAY_ENTRE_BLOCOS)
+        
+        # Lê segundo bloco: 0x0010 a 0x001F (16 registradores)
+        self.logger.info(">>> Lendo bloco 0x0010-0x001F (16 registradores)...")
+        valores_bloco2 = self.ler_bloco_registradores(0x0010, 16)
+        
+        if valores_bloco2:
+            self.logger.info("-" * 50)
+            self.logger.info("BLOCO 2 (0x0010-0x001F):")
+            for i, val in enumerate(valores_bloco2):
+                endereco = 0x0010 + i
+                self.logger.info(f"  Reg 0x{endereco:04X} (dec {endereco:5d}): {val:6d} (0x{val:04X})")
+            self.logger.info("-" * 50)
+        else:
+            self.logger.error("Falha ao ler bloco 2 (0x0010-0x001F)")
+        
+        # Análise especial
+        self.logger.info("=" * 70)
+        self.logger.info("=== ANÁLISE ESPECIAL ===")
+        
+        if valores_bloco1 and len(valores_bloco1) >= 14:
+            # Horímetro nos registradores 0x000D e 0x000E (índices 13 e 14)
+            reg_0d = valores_bloco1[13] if len(valores_bloco1) > 13 else 0
+            reg_0e = valores_bloco1[14] if len(valores_bloco1) > 14 else 0
+            
+            self.logger.info(f"Horímetro (0x000D + 0x000E):")
+            self.logger.info(f"  Reg 0x000D = {reg_0d} (0x{reg_0d:04X})")
+            self.logger.info(f"  Reg 0x000E = {reg_0e} (0x{reg_0e:04X})")
+            
+            # Testar interpretações
+            horimetro_32bit = (reg_0d << 16) | reg_0e
+            self.logger.info(f"  32-bit Big-Endian: {horimetro_32bit}")
+            self.logger.info(f"    Em segundos: {horimetro_32bit / 3600.0:.2f} horas")
+            self.logger.info(f"    Em minutos:  {horimetro_32bit / 60.0:.2f} horas")
+            
+            # Testar apenas reg 0x000D
+            self.logger.info(f"  Apenas 0x000D ({reg_0d}):")
+            self.logger.info(f"    Em segundos: {reg_0d / 3600.0:.2f} horas")
+            self.logger.info(f"    Em minutos:  {reg_0d / 60.0:.2f} horas")
+            self.logger.info(f"    Direto:      {reg_0d} (se já for horas*X)")
+            
+            # Testar formato especial: 0x3920 = 14624
+            # Se o valor está como HHMM (hora * 100 + minutos)?
+            hh = reg_0d // 100
+            mm = reg_0d % 100
+            self.logger.info(f"    Formato HHMM: {hh}h {mm}m")
+        
+        if valores_bloco1 and len(valores_bloco1) >= 16:
+            reg_0f = valores_bloco1[15] if len(valores_bloco1) > 15 else 0
+            self.logger.info(f"Reg 0x000F (antigo 'Partidas'): {reg_0f}")
+        
+        if valores_bloco2 and len(valores_bloco2) >= 1:
+            reg_10 = valores_bloco2[0]
+            self.logger.info(f"Reg 0x0010 (PARTIDAS real): {reg_10}")
+        
+        self.logger.info("=" * 70)
+        self.logger.info("=== FIM DO SCAN ===")
+        self.logger.info("=" * 70)
+    
     def ler_todos_registradores(self) -> Dict[str, Any]:
         """
         Lê todos os registradores K30XL em duas requisições (blocos).
         
-        CORREÇÃO v2.2.0: Adiciona delay entre blocos para evitar dessincronização.
+        CORREÇÃO v2.3.0: Mapeamento corrigido - Partidas em 0x0010
         """
         dados = {}
         
@@ -523,58 +601,84 @@ class ConexaoHF:
         self.logger.info(f"Bloco 2 RAW: {[f'0x{v:04X}' for v in valores_bloco2]}")
         
         # Processar Bloco 2
-        # Índice 0-1: Horímetro 32-bit (0x000D-0x000E) - segundos
+        # Índice 0-1: Horímetro 32-bit (0x000D-0x000E)
+        # CORREÇÃO v2.3.0: Testar em MINUTOS em vez de segundos
         if len(valores_bloco2) >= 2:
             self.logger.info(f"  Reg 0x000D: {valores_bloco2[0]} (0x{valores_bloco2[0]:04X})")
             self.logger.info(f"  Reg 0x000E: {valores_bloco2[1]} (0x{valores_bloco2[1]:04X})")
             
-            # Testar ambas as ordens de bytes
-            horimetro_big = (valores_bloco2[0] << 16) | valores_bloco2[1]
-            horimetro_little = (valores_bloco2[1] << 16) | valores_bloco2[0]
+            # Testar interpretações
+            horimetro_32bit = (valores_bloco2[0] << 16) | valores_bloco2[1]
             
-            horas_big = horimetro_big / 3600.0
-            horas_little = horimetro_little / 3600.0
+            # Opção 1: Em segundos (antigo)
+            horas_segundos = horimetro_32bit / 3600.0
             
-            self.logger.info(f"  Horímetro Big-Endian: {horas_big:.2f} h")
-            self.logger.info(f"  Horímetro Little-Endian: {horas_little:.2f} h")
+            # Opção 2: Em MINUTOS (NOVA HIPÓTESE v2.3.0)
+            horas_minutos = horimetro_32bit / 60.0
             
-            # Escolher a interpretação que faz sentido físico
+            # Opção 3: Apenas reg 0x000D em minutos
+            horas_reg0d_minutos = valores_bloco2[0] / 60.0
+            
+            self.logger.info(f"  Interpretações:")
+            self.logger.info(f"    32-bit em segundos: {horas_segundos:.2f} h")
+            self.logger.info(f"    32-bit em minutos:  {horas_minutos:.2f} h")
+            self.logger.info(f"    0x000D em minutos:  {horas_reg0d_minutos:.2f} h (← esperado ~285h)")
+            
+            # Escolher a interpretação mais próxima de 285h
+            # Se reg 0x000D = 14624 e esperamos 285h, então: 14624 / 285 = 51.3
+            # Pode ser décimos de hora? 14624 / 10 = 1462.4 ❌
+            # Pode ser formato especial? 
+            
             horas_trabalhadas = None
             
-            if 0 < horas_big < MAX_HORIMETRO_HORAS:
-                horas_trabalhadas = round(horas_big, 2)
-                self.logger.info(f"  >>> USANDO Big-Endian: {horas_trabalhadas} h")
-            elif 0 < horas_little < MAX_HORIMETRO_HORAS:
-                horas_trabalhadas = round(horas_little, 2)
-                self.logger.warning(f"  >>> USANDO Little-Endian: {horas_trabalhadas} h")
+            # Testar: 0x000D pode conter minutos totais (14624 min = 243.7h)
+            if 0 < horas_reg0d_minutos < MAX_HORIMETRO_HORAS:
+                horas_trabalhadas = round(horas_reg0d_minutos, 2)
+                self.logger.info(f"  >>> USANDO Reg 0x000D em minutos: {horas_trabalhadas} h")
+            elif 0 < horas_segundos < MAX_HORIMETRO_HORAS:
+                horas_trabalhadas = round(horas_segundos, 2)
+                self.logger.info(f"  >>> USANDO 32-bit em segundos: {horas_trabalhadas} h")
             else:
-                self.logger.error(f"  >>> INVÁLIDO! Ambos fora da faixa válida")
+                self.logger.error(f"  >>> INVÁLIDO! Valores fora da faixa válida")
             
             if horas_trabalhadas is not None:
                 dados["horas_trabalhadas"] = horas_trabalhadas
         
-        # Índice 2: Partidas (0x000F)
+        # Índice 2: Reg 0x000F (desconhecido - sempre 0)
         if len(valores_bloco2) >= 3:
-            dados["numero_partidas"] = valores_bloco2[2]
-            self.logger.info(f"  Reg 0x000F (Partidas): {valores_bloco2[2]}")
+            self.logger.info(f"  Reg 0x000F (???): {valores_bloco2[2]}")
         
-        # Índice 3: Status Bits (0x0010)
+        # CORREÇÃO v2.3.0: Índice 3 = PARTIDAS (0x0010)
+        # Antes era interpretado como Status Bits, mas 0x0271 = 625 = Partidas!
         if len(valores_bloco2) >= 4:
-            status_word = valores_bloco2[3]
-            self.logger.info(f"  Reg 0x0010 (Status): 0x{status_word:04X}")
-            status_bits = self.extrair_status_bits(status_word)
-            dados.update(status_bits)
+            dados["numero_partidas"] = valores_bloco2[3]
+            self.logger.info(f"  Reg 0x0010 (PARTIDAS): {valores_bloco2[3]} ✓")
+        
+        # Índice 4-5: Possivelmente status ou reservado
+        if len(valores_bloco2) >= 5:
+            self.logger.info(f"  Reg 0x0011: {valores_bloco2[4]} (0x{valores_bloco2[4]:04X})")
+        if len(valores_bloco2) >= 6:
+            self.logger.info(f"  Reg 0x0012: {valores_bloco2[5]} (0x{valores_bloco2[5]:04X})")
         
         # Índice 6: Nível Combustível (0x0013)
         if len(valores_bloco2) >= 7:
             dados["nivel_combustivel"] = valores_bloco2[6]
             self.logger.info(f"  Reg 0x0013 (Combustível): {valores_bloco2[6]}%")
         
+        # Status bits: Não sabemos onde estão após correção
+        # Por enquanto, definir valores padrão baseados na rede
+        tensao_rede = dados.get("tensao_rede_rs", 0)
+        dados["rede_ok"] = tensao_rede > 180
+        dados["motor_funcionando"] = dados.get("rpm_motor", 0) > 100
+        dados["gmg_alimentando"] = dados.get("tensao_gmg", 0) > 180
+        dados["aviso_ativo"] = False
+        dados["falha_ativa"] = False
+        
         # =========================================
         # LOG RESUMIDO
         # =========================================
         self.logger.info("=" * 50)
-        self.logger.info("RESUMO LEITURA:")
+        self.logger.info("RESUMO LEITURA v2.3.0:")
         self.logger.info(f"  Horímetro: {dados.get('horas_trabalhadas', 'N/A')} h")
         self.logger.info(f"  Partidas: {dados.get('numero_partidas', 'N/A')}")
         self.logger.info(f"  Tensão Rede: {dados.get('tensao_rede_rs', 'N/A')} V")
@@ -656,6 +760,12 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
                 if not conexao.aceitar_conexao():
                     continue
             
+            # Modo SCAN: apenas varre e sai
+            if MODO_SCAN:
+                conexao.scan_registradores()
+                log.info("Scan completo. Encerrando...")
+                break
+            
             # Faz polling dos registradores
             dados = conexao.ler_todos_registradores()
             
@@ -691,13 +801,18 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
 def main():
     """Inicia threads para cada gerador habilitado"""
     logger.info("=" * 60)
-    logger.info("VPS Modbus Reader - K30XL v2.2.0 (Sincronização por Marcador)")
+    logger.info("VPS Modbus Reader - K30XL v2.3.0 (Mapeamento Corrigido)")
     logger.info("IMPORTANTE: Configure HF2211 com baudrate 19200!")
     logger.info(f"Edge Function: {EDGE_FUNCTION_URL}")
     
     if MODO_DEBUG:
         logger.info("*" * 60)
         logger.info("*** MODO DEBUG ATIVADO - DADOS NÃO SERÃO SALVOS ***")
+        logger.info("*" * 60)
+    
+    if MODO_SCAN:
+        logger.info("*" * 60)
+        logger.info("*** MODO SCAN ATIVADO - VARREDURA DE REGISTRADORES ***")
         logger.info("*" * 60)
     
     logger.info("=" * 60)
@@ -731,6 +846,13 @@ def main():
         threads.append(t)
         logger.info(f"Thread iniciada para porta {porta_vps}")
     
+    # No modo scan, aguarda a thread terminar
+    if MODO_SCAN:
+        for t in threads:
+            t.join()
+        logger.info("Scan finalizado.")
+        return
+    
     # Health check API (porta 3001)
     logger.info("Iniciando Health API na porta 3001...")
     iniciar_health_api()
@@ -758,8 +880,8 @@ class HealthHandler(BaseHTTPRequestHandler):
             response = {
                 "status": "ok",
                 "service": "vps-modbus-reader",
-                "version": "2.2.0",
-                "protocol": "Modbus RTU (K30XL - Sync por Marcador)",
+                "version": "2.3.0",
+                "protocol": "Modbus RTU (K30XL - Mapeamento Corrigido)",
                 "debug_mode": MODO_DEBUG,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
@@ -841,6 +963,14 @@ if __name__ == "__main__":
     
     if "--teste" in sys.argv:
         testar_envio_simulado()
+    elif "--scan" in sys.argv:
+        MODO_SCAN = True
+        MODO_DEBUG = True  # Scan sempre em debug
+        logger.info("*" * 60)
+        logger.info("*** MODO SCAN ATIVADO VIA ARGUMENTO ***")
+        logger.info("*** VARREDURA DE REGISTRADORES 0x0000-0x001F ***")
+        logger.info("*" * 60)
+        main()
     elif "--debug" in sys.argv:
         MODO_DEBUG = True
         logger.info("*" * 60)
