@@ -252,12 +252,27 @@ class ConexaoHF:
             self.logger.debug(f"TX RTU: {frame.hex(' ').upper()}")
             self.socket_cliente.send(frame)
             
-            # Aguarda resposta RTU
-            time.sleep(0.1)  # Delay para resposta do K30XL
-            resposta = self.socket_cliente.recv(256)
-            self.logger.debug(f"RX RTU: {resposta.hex(' ').upper()}")
+            # Aguarda resposta RTU com loop de recebimento gradual
+            tempo_inicio = time.time()
+            resposta = b''
+            while time.time() - tempo_inicio < self.config["timeout"]:
+                try:
+                    chunk = self.socket_cliente.recv(256)
+                    if chunk:
+                        resposta += chunk
+                        # Resposta mínima válida: 5 bytes (addr + fc + bytecount + data + crc)
+                        if len(resposta) >= 5:
+                            break
+                except socket.timeout:
+                    break
+                time.sleep(0.05)  # Pequeno delay entre tentativas
             
-            return resposta
+            if resposta:
+                self.logger.debug(f"RX RTU: {resposta.hex(' ').upper()}")
+            else:
+                self.logger.warning("Nenhuma resposta recebida")
+            
+            return resposta if resposta else None
             
         except socket.timeout:
             self.logger.error("Erro Modbus: timed out")
