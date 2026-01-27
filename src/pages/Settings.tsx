@@ -2,14 +2,18 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Save, User, Bell, Clock, Shield } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useProfile } from "@/hooks/useProfile";
 
 export default function Settings() {
+  const { profile, isLoading, isSaving, updateProfile } = useProfile();
+
   const [userSettings, setUserSettings] = useState({
-    name: "Administrador",
-    email: "admin@empresa.com",
-    company: "Empresa LTDA",
+    name: "",
+    email: "",
+    company: "",
   });
 
   const [notificationSettings, setNotificationSettings] = useState({
@@ -24,9 +28,38 @@ export default function Settings() {
     timezone: "America/Sao_Paulo",
   });
 
-  const handleSave = () => {
-    console.log("Saving settings:", { userSettings, notificationSettings, systemSettings });
+  // Sync form with database
+  useEffect(() => {
+    if (profile) {
+      setUserSettings({
+        name: profile.name || "",
+        email: profile.email || "",
+        company: profile.company || "",
+      });
+    }
+  }, [profile]);
+
+  const handleSave = async () => {
+    await updateProfile({
+      name: userSettings.name,
+      email: userSettings.email,
+      company: userSettings.company,
+    });
+    // Note: notification and system settings could be saved to a separate table if needed
   };
+
+  if (isLoading) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-6 max-w-4xl">
+          <Skeleton className="h-10 w-64" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
@@ -193,11 +226,11 @@ export default function Settings() {
             </div>
             <div>
               <p className="text-muted-foreground">IP</p>
-              <p className="text-foreground font-mono">192.168.1.100</p>
+              <p className="text-foreground font-mono">--</p>
             </div>
             <div>
               <p className="text-muted-foreground">Navegador</p>
-              <p className="text-foreground">Chrome 120</p>
+              <p className="text-foreground">--</p>
             </div>
             <div>
               <p className="text-muted-foreground">2FA</p>
@@ -208,9 +241,13 @@ export default function Settings() {
 
         {/* Save button */}
         <div className="flex justify-end">
-          <Button onClick={handleSave} className="bg-primary text-primary-foreground hover:bg-primary/90">
+          <Button 
+            onClick={handleSave} 
+            disabled={isSaving}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
             <Save className="w-4 h-4 mr-2" />
-            Salvar Configurações
+            {isSaving ? "Salvando..." : "Salvar Configurações"}
           </Button>
         </div>
       </div>
