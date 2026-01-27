@@ -410,10 +410,21 @@ class ConexaoHF:
         # Processar Bloco 2
         # Índice 0-1: Horímetro 32-bit (0x000D-0x000E) - segundos
         if len(valores_bloco2) >= 2:
-            horimetro_segundos = (valores_bloco2[0] << 16) | valores_bloco2[1]
+            # Log valores brutos para debug
+            self.logger.info(f"  [DEBUG] Reg 0x000D (raw): {valores_bloco2[0]} (0x{valores_bloco2[0]:04X})")
+            self.logger.info(f"  [DEBUG] Reg 0x000E (raw): {valores_bloco2[1]} (0x{valores_bloco2[1]:04X})")
+            
+            # Testar ambas as ordens de bytes
+            horimetro_big = (valores_bloco2[0] << 16) | valores_bloco2[1]  # Big-endian
+            horimetro_little = (valores_bloco2[1] << 16) | valores_bloco2[0]  # Little-endian
+            
+            self.logger.info(f"  [DEBUG] Horímetro Big-Endian: {horimetro_big} seg = {horimetro_big/3600:.2f} h")
+            self.logger.info(f"  [DEBUG] Horímetro Little-Endian: {horimetro_little} seg = {horimetro_little/3600:.2f} h")
+            
+            # Usar big-endian (padrão Modbus)
+            horimetro_segundos = horimetro_big
             horas_trabalhadas = round(horimetro_segundos / 3600.0, 2)
             dados["horas_trabalhadas"] = horas_trabalhadas
-            self.logger.debug(f"  [0x000D-0E] Horímetro: {horimetro_segundos} seg = {horas_trabalhadas} h")
         
         # Índice 2: Partidas (0x000F)
         if len(valores_bloco2) >= 3:
