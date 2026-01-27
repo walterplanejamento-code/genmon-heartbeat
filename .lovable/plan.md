@@ -1,70 +1,63 @@
 
-# Plano: Página de Diagnóstico Modbus + Correção do Script VPS
+# Plano: Correção do Mapeamento de Registradores K30XL
 
-## Resumo do Problema
+## Problema Identificado
 
-Os dados estão chegando ao banco de dados com valores de horímetro completamente errados e oscilantes. O problema está no script da VPS que não está sincronizando corretamente a leitura dos bytes.
+A sincronização v2.2.0 está funcionando corretamente (CRC OK, frames válidos), mas o **mapeamento dos registradores está incorreto** para este controlador K30XL específico.
 
----
+### Evidência Concreta
 
-## Parte 1: Criar Página de Diagnóstico no Sistema
+| Display Físico | Log VPS | Conclusão |
+|----------------|---------|-----------|
+| Partidas: **625** | Reg 0x0010 = 0x0271 = **625** | ✅ Reg 0x0010 = Partidas (não Status!) |
+| Horímetro: **285:30h** | 266221.8 h | ❌ Interpretação errada |
 
-Criar uma nova página "Diagnóstico" que mostra:
-- Bytes RAW recebidos do Modbus (em hexadecimal)
-- Histórico das últimas 10 leituras com timestamp
-- Comparação visual entre valores estáveis e instáveis
-- Indicador de qualidade dos dados
+O valor 0x0271 = 625 decimal está no **Reg 0x0010**, mas o script interpreta esse registrador como "Status Bits".
 
-### Novo Arquivo: `src/pages/Diagnostics.tsx`
+### Análise do Horímetro
 
-Uma página completa com:
-- Tabela mostrando últimas leituras do banco
-- Destaque visual quando valores mudam muito entre leituras
-- Botão para limpar dados antigos do banco (opcional)
-- Exibição do tempo entre leituras
+Valor recebido: `Reg 0x000D = 0x3920 = 14624`
 
-### Atualizar: `src/App.tsx`
-
-Adicionar rota `/diagnostics` para a nova página.
-
-### Atualizar: `src/components/layout/Sidebar.tsx`
-
-Adicionar link "Diagnóstico" no menu lateral.
+Possíveis interpretações:
+- Em segundos: 14624 / 3600 = 4.06h ❌
+- Em minutos: 14624 / 60 = 243.7h (próximo de 285h, mas não exato)
+- Formato BCD ou diferente?
 
 ---
 
-## Parte 2: Correção Definitiva do Script VPS
+## Solução Proposta
 
-O problema real identificado nos logs:
+### 1. Corrigir Mapeamento do Bloco 2
 
+Ajustar a interpretação dos registradores no script:
+
+```text
+ATUAL (Errado):
+  Índice 0-1: Horímetro (0x000D-0x000E) em segundos
+  Índice 2:   Partidas (0x000F)
+  Índice 3:   Status Bits (0x0010)
+
+PROPOSTO (Baseado nas evidências):
+  Índice 0-1: Horímetro (0x000D-0x000E) em MINUTOS (não segundos!)
+  Índice 3:   Partidas (0x0010) → 625 ✓
+  Índice ?:   Status Bits (outro registrador?)
 ```
-Bloco 2 RAW: ['0x0306', ...] → Horímetro: 14090 h
-Bloco 2 RAW: ['0x0E06', ...] → Horímetro: 65353 h
-```
 
-O primeiro byte (0x03 vs 0x0E) está mudando! Isso indica que o frame Modbus está começando em posições diferentes do buffer.
+### 2. Testar Horímetro em Minutos
 
-### Solução: Sincronização por Marcador de Início
+Se `14624 minutos / 60 = 243.7 horas`, está próximo mas não exato.
 
-Em vez de confiar que o primeiro byte recebido é sempre o endereço do dispositivo, vamos:
-1. Descartar bytes até encontrar o padrão esperado: `01 03 XX`
-2. Ler o byte count para saber quantos bytes esperar
-3. Validar CRC antes de processar
+Vamos testar também se é **décimos de minuto**:
+- 14624 * 0.1 min / 60 = 24.37h ❌
 
-### Correções no Script (`docs/vps-modbus-reader.py`):
+Ou se os dois words (0x3920 + 0x0000) devem ser lidos como **word-swap**:
+- 0x00003920 / 60 = 243.73h (ainda não bate)
 
-1. **Nova função `sincronizar_resposta()`**
-   - Busca o padrão `01 03` no buffer
-   - Descarta bytes anteriores (lixo)
-   - Lê a quantidade correta de bytes baseada no byte count
+**Hipótese mais provável**: O valor pode estar em um formato proprietário STEMAC que precisa de validação adicional.
 
-2. **Aumentar delay entre blocos**
-   - Adicionar 500ms entre leitura do Bloco 1 e Bloco 2
-   - Dar tempo para o buffer limpar completamente
+### 3. Adicionar Scan de Registradores
 
-3. **Log de bytes descartados**
-   - Mostrar quantos bytes de lixo foram descartados
-   - Isso ajuda a identificar se há problema no HF2211
+Criar função para ler TODOS os registradores de 0x0000 a 0x0020 e mostrar os valores para descobrir onde realmente está cada dado.
 
 ---
 
@@ -72,86 +65,101 @@ Em vez de confiar que o primeiro byte recebido é sempre o endereço do disposit
 
 | Arquivo | Ação |
 |---------|------|
-| `src/pages/Diagnostics.tsx` | **CRIAR** - Página de diagnóstico |
-| `src/App.tsx` | Adicionar rota `/diagnostics` |
-| `src/components/layout/Sidebar.tsx` | Adicionar link no menu |
-| `docs/vps-modbus-reader.py` | Sincronização por marcador + delay entre blocos |
+| `docs/vps-modbus-reader.py` | Corrigir mapeamento: 0x0010 = Partidas |
+| `docs/vps-modbus-reader.py` | Testar horímetro em minutos em vez de segundos |
+| `docs/vps-modbus-reader.py` | Adicionar modo `--scan` para varrer registradores |
 
 ---
 
-## Código da Página de Diagnóstico
-
-A página vai:
-1. Buscar as últimas 20 leituras do banco
-2. Mostrar em tabela com destaque para valores que mudam muito
-3. Calcular a variação percentual entre leituras consecutivas
-4. Mostrar status de conexão em tempo real
-
----
-
-## Código Atualizado do Script VPS
-
-A correção principal será:
+## Código: Correção Principal
 
 ```python
-def sincronizar_resposta(self, tamanho_esperado: int) -> bytes:
-    """
-    Sincroniza a leitura buscando o padrão de início Modbus.
-    Descarta bytes de lixo até encontrar: [ADDR=01][FC=03][BYTECOUNT]
-    """
-    buffer = bytearray()
-    lixo_descartado = 0
-    
-    while True:
-        byte = self.socket_cliente.recv(1)
-        if not byte:
-            break
-            
-        buffer.append(byte[0])
-        
-        # Procura padrão de início: 01 03
-        if len(buffer) >= 2:
-            # Encontrou início válido
-            if buffer[-2] == 0x01 and buffer[-1] == 0x03:
-                # Descarta lixo anterior
-                if len(buffer) > 2:
-                    lixo_descartado = len(buffer) - 2
-                    self.logger.warning(f"Bytes de lixo descartados: {lixo_descartado}")
-                    buffer = buffer[-2:]
-                
-                # Lê o resto do frame
-                byte_count = self.socket_cliente.recv(1)[0]
-                buffer.append(byte_count)
-                
-                # Lê dados + CRC
-                restante = byte_count + 2  # dados + 2 bytes CRC
-                dados = self.socket_cliente.recv(restante)
-                buffer.extend(dados)
-                
-                return bytes(buffer)
-        
-        # Limite de segurança
-        if len(buffer) > 100:
-            self.logger.error("Muitos bytes sem encontrar padrão válido")
-            return bytes()
-    
-    return bytes(buffer)
+# ANTES (linha 557-559):
+# Índice 2: Partidas (0x000F)
+if len(valores_bloco2) >= 3:
+    dados["numero_partidas"] = valores_bloco2[2]
+
+# DEPOIS (correção):
+# Índice 3: Partidas (0x0010) - CONFIRMADO pelo display físico!
+if len(valores_bloco2) >= 4:
+    dados["numero_partidas"] = valores_bloco2[3]  # Era valores_bloco2[2]
+    self.logger.info(f"  Reg 0x0010 (Partidas): {valores_bloco2[3]}")
 ```
+
+```python
+# ANTES: Horímetro em segundos
+horas_big = horimetro_big / 3600.0
+
+# DEPOIS: Testar horímetro em minutos
+horas_big = horimetro_big / 60.0  # Assumindo valor em minutos
+```
+
+---
+
+## Código: Modo Scan de Registradores
+
+Adicionar novo argumento `--scan` para fazer varredura completa:
+
+```python
+def scan_registradores(self) -> None:
+    """Lê registradores de 0x0000 a 0x001F e mostra todos os valores"""
+    self.logger.info("=" * 60)
+    self.logger.info("=== SCAN DE REGISTRADORES 0x0000-0x001F ===")
+    
+    valores = self.ler_bloco_registradores(0x0000, 32)  # 32 registradores
+    
+    if valores:
+        for i, val in enumerate(valores):
+            self.logger.info(f"  Reg 0x{i:04X}: {val:5d} (0x{val:04X})")
+    
+    self.logger.info("=" * 60)
+```
+
+Isso vai mostrar TODOS os valores para você identificar exatamente onde está cada dado.
 
 ---
 
 ## Resultado Esperado
 
-1. **Página de Diagnóstico**: Você verá em tempo real se os dados estão estáveis ou oscilando
-2. **Script VPS**: A sincronização por marcador vai garantir que sempre lemos do início correto do frame
-3. **Dados Confiáveis**: O horímetro vai estabilizar no valor real do gerador
+1. **Partidas corrigidas**: Vai mostrar 625 corretamente
+2. **Scan de registradores**: Você poderá ver todos os valores e confirmar o mapeamento
+3. **Horímetro**: Após o scan, vamos identificar o formato correto
 
 ---
 
-## Passos de Implantação
+## Próximos Passos Após Aprovação
 
-1. Aprovar este plano para eu criar a página de diagnóstico
-2. Copiar o script atualizado para a VPS
-3. Parar serviço: `systemctl stop gmg-lovable`
-4. Executar em modo debug: `python3 vps-modbus-reader.py --debug`
-5. Acompanhar na página de diagnóstico se os dados estabilizam
+1. Atualizar script com correção de partidas (0x0010)
+2. Adicionar modo `--scan` 
+3. Você roda `python3 vps-modbus-reader.py --scan` na VPS
+4. Com os 32 registradores visíveis, identificamos o formato do horímetro
+
+---
+
+## Seção Técnica
+
+### Por que o mapeamento está diferente do manual?
+
+O manual STEMAC K30XL pode ter variações entre versões (1.0 a 3.01). O controlador no campo pode estar usando um layout de registradores ligeiramente diferente do documentado.
+
+### Bytes do Bloco 2 decomposto:
+
+```text
+RX: 01 03 0E 39 20 00 00 00 00 02 71 00 00 00 00 00 00 49 92
+    │  │  │  └──────────────────────────────────────┘  └───┘
+    │  │  │         14 bytes de dados (7 regs)          CRC
+    │  │  └── Byte count = 14
+    │  └── Function code = 03
+    └── Slave = 01
+
+Dados:
+  39 20 = Reg 0x000D = 0x3920 = 14624 (Horímetro?)
+  00 00 = Reg 0x000E = 0x0000 = 0
+  00 00 = Reg 0x000F = 0x0000 = 0
+  02 71 = Reg 0x0010 = 0x0271 = 625 (PARTIDAS! ✓)
+  00 00 = Reg 0x0011 = 0
+  00 00 = Reg 0x0012 = 0
+  00 00 = Reg 0x0013 = 0 (Combustível)
+```
+
+O valor 625 está definitivamente em 0x0010, confirmando que o script estava interpretando errado.
