@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Script VPS - Leitor Modbus K30XL (Modo Ativo)
-=============================================
+Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.2.0
+=====================================================
 
 Este script roda na VPS (82.25.70.90) em MODO ATIVO:
 - A VPS escuta em portas TCP (15001, 15002, 15003)
@@ -16,6 +16,11 @@ IMPORTANTE: Configuração do HF2211
 
 Arquitetura:
     [Gerador] → [K30XL] → [RS-232] → [HF2211] → [Internet] → [VPS:15002] → [Backend]
+
+CORREÇÃO v2.2.0: Sincronização por Marcador
+- Busca padrão 01 03 no buffer antes de processar
+- Descarta bytes de lixo automaticamente
+- Delay de 500ms entre leitura dos blocos
 
 Requisitos:
     pip install requests
@@ -66,29 +71,32 @@ GERADORES_CONFIG = {
         "controlador": "SmartGen",
         "porta_escuta": 15001,
         "endereco_modbus": 1,
-        "timeout": 3.0,
-        "habilitado": False,  # Desabilitado por enquanto
+        "timeout": 5.0,  # Aumentado para sincronização
+        "habilitado": False,
     },
     "15002": {
         "nome": "Gerador 2 - K30XL",
         "controlador": "K30XL",
         "porta_escuta": 15002,
         "endereco_modbus": 1,
-        "timeout": 3.0,
-        "habilitado": True,  # Este é o gerador ativo
+        "timeout": 5.0,  # Aumentado para sincronização
+        "habilitado": True,
     },
     "15003": {
         "nome": "Gerador 3 - SmartGen",
         "controlador": "SmartGen",
         "porta_escuta": 15003,
         "endereco_modbus": 1,
-        "timeout": 3.0,
-        "habilitado": False,  # Desabilitado por enquanto
+        "timeout": 5.0,
+        "habilitado": False,
     },
 }
 
 # Intervalo entre leituras (segundos)
 INTERVALO_LEITURA = 10
+
+# CORREÇÃO: Delay entre leitura dos blocos (ms)
+DELAY_ENTRE_BLOCOS = 0.5  # 500ms
 
 # Limite máximo razoável para horímetro (em horas)
 MAX_HORIMETRO_HORAS = 500000  # ~57 anos
@@ -232,8 +240,7 @@ class ConexaoHF:
     
     def limpar_buffer_socket(self):
         """
-        CORREÇÃO: Limpa bytes residuais do socket antes de nova leitura.
-        Isso evita que bytes de respostas anteriores contaminem a próxima leitura.
+        Limpa bytes residuais do socket antes de nova leitura.
         """
         if not self.socket_cliente:
             return
@@ -246,7 +253,7 @@ class ConexaoHF:
                     lixo = self.socket_cliente.recv(256)
                     if lixo:
                         bytes_descartados += len(lixo)
-                        self.logger.warning(f"Bytes residuais descartados: {lixo.hex(' ').upper()}")
+                        self.logger.warning(f"Lixo no buffer (pré-comando): {lixo.hex(' ').upper()}")
                     else:
                         break
                 except BlockingIOError:
@@ -256,19 +263,112 @@ class ConexaoHF:
             self.socket_cliente.settimeout(self.config["timeout"])
             
             if bytes_descartados > 0:
-                self.logger.warning(f"Total de {bytes_descartados} bytes residuais limpos do buffer")
+                self.logger.warning(f"Total de {bytes_descartados} bytes residuais limpos")
                 
         except Exception as e:
             self.logger.debug(f"Erro ao limpar buffer: {e}")
+
+    def sincronizar_resposta(self, slave_addr: int, tamanho_dados: int) -> Optional[bytes]:
+        """
+        CORREÇÃO v2.2.0: Sincroniza a leitura buscando o padrão de início Modbus.
+        Descarta bytes de lixo até encontrar: [ADDR][FC=03][BYTECOUNT]
+        
+        Args:
+            slave_addr: Endereço do escravo Modbus (geralmente 1)
+            tamanho_dados: Quantidade de bytes de dados esperados (qty * 2)
+        
+        Returns:
+            Frame Modbus completo ou None em caso de erro
+        """
+        if not self.socket_cliente:
+            return None
+        
+        buffer = bytearray()
+        lixo_descartado = 0
+        tempo_inicio = time.time()
+        tamanho_total = 3 + tamanho_dados + 2  # ADDR + FC + BYTECOUNT + DATA + CRC
+        
+        self.logger.debug(f"Sincronizando resposta (esperando {tamanho_total} bytes)...")
+        
+        while time.time() - tempo_inicio < self.config["timeout"]:
+            try:
+                byte = self.socket_cliente.recv(1)
+                if not byte:
+                    time.sleep(0.01)
+                    continue
+                    
+                buffer.append(byte[0])
+                
+                # Procura padrão de início: [ADDR] [0x03]
+                if len(buffer) >= 2:
+                    # Verifica se os últimos 2 bytes são o início válido
+                    if buffer[-2] == slave_addr and buffer[-1] == 0x03:
+                        # Calcula lixo descartado
+                        if len(buffer) > 2:
+                            lixo_descartado = len(buffer) - 2
+                            lixo_bytes = bytes(buffer[:-2])
+                            self.logger.warning(f"Bytes de LIXO descartados ({lixo_descartado}): {lixo_bytes.hex(' ').upper()}")
+                            buffer = bytearray([slave_addr, 0x03])
+                        
+                        # Lê o byte count
+                        byte_count_raw = self.socket_cliente.recv(1)
+                        if not byte_count_raw:
+                            self.logger.error("Falha ao ler byte count")
+                            return None
+                        
+                        byte_count = byte_count_raw[0]
+                        buffer.append(byte_count)
+                        
+                        # Verifica se byte count faz sentido
+                        if byte_count != tamanho_dados:
+                            self.logger.warning(f"Byte count diferente: recebido={byte_count}, esperado={tamanho_dados}")
+                        
+                        # Lê dados + CRC
+                        restante = byte_count + 2  # dados + 2 bytes CRC
+                        dados_crc = b''
+                        tempo_dados = time.time()
+                        
+                        while len(dados_crc) < restante and time.time() - tempo_dados < 2.0:
+                            chunk = self.socket_cliente.recv(restante - len(dados_crc))
+                            if chunk:
+                                dados_crc += chunk
+                            else:
+                                time.sleep(0.01)
+                        
+                        if len(dados_crc) < restante:
+                            self.logger.error(f"Dados incompletos: {len(dados_crc)}/{restante}")
+                            return None
+                        
+                        buffer.extend(dados_crc)
+                        frame_completo = bytes(buffer)
+                        
+                        self.logger.info(f"RX RTU ({len(frame_completo)} bytes): {frame_completo.hex(' ').upper()}")
+                        
+                        if lixo_descartado > 0:
+                            self.logger.info(f">>> Frame sincronizado após descartar {lixo_descartado} bytes de lixo")
+                        
+                        return frame_completo
+                
+                # Limite de segurança
+                if len(buffer) > 100:
+                    self.logger.error(f"Muitos bytes ({len(buffer)}) sem encontrar padrão válido")
+                    self.logger.error(f"Buffer: {bytes(buffer).hex(' ').upper()}")
+                    return None
+                    
+            except socket.timeout:
+                continue
+            except Exception as e:
+                self.logger.error(f"Erro na sincronização: {e}")
+                return None
+        
+        self.logger.error("Timeout na sincronização")
+        return None
     
     def enviar_comando_modbus_rtu(self, funcao: int, endereco: int, quantidade: int) -> Optional[bytes]:
         """
-        Envia comando Modbus RTU através do socket (modo transparente HF2211).
+        Envia comando Modbus RTU e recebe resposta sincronizada.
         
-        Frame RTU: [Slave Addr (1)] [Function (1)] [Start Addr (2)] [Qty (2)] [CRC-16 (2)]
-        Resposta:  [Slave Addr (1)] [Function (1)] [ByteCount (1)] [Data (N*2)] [CRC-16 (2)]
-        
-        CORREÇÃO: Limpa buffer antes de enviar e aguarda tamanho completo da resposta.
+        CORREÇÃO v2.2.0: Usa sincronização por marcador em vez de leitura direta.
         """
         if not self.cliente_conectado or not self.socket_cliente:
             return None
@@ -289,40 +389,17 @@ class ConexaoHF:
         crc = self.calcular_crc16(pdu)
         frame = pdu + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
         
-        # Calcula tamanho esperado da resposta:
-        # [Slave(1)] + [FC(1)] + [ByteCount(1)] + [Data(qty*2)] + [CRC(2)]
-        tamanho_esperado = 5 + (quantidade * 2)
-        
         try:
-            # CORREÇÃO: Limpa buffer antes de enviar novo comando
+            # Limpa buffer antes de enviar
             self.limpar_buffer_socket()
             
-            self.logger.debug(f"TX RTU: {frame.hex(' ').upper()}")
-            self.logger.debug(f"Aguardando {tamanho_esperado} bytes de resposta...")
+            self.logger.info(f"TX RTU: {frame.hex(' ').upper()}")
             self.socket_cliente.send(frame)
             
-            # Aguarda resposta RTU com loop de recebimento gradual
-            tempo_inicio = time.time()
-            resposta = b''
-            while time.time() - tempo_inicio < self.config["timeout"]:
-                try:
-                    chunk = self.socket_cliente.recv(256)
-                    if chunk:
-                        resposta += chunk
-                        self.logger.debug(f"Recebido chunk: {len(chunk)} bytes, total: {len(resposta)}/{tamanho_esperado}")
-                        # Aguarda tamanho completo baseado na quantidade de registradores
-                        if len(resposta) >= tamanho_esperado:
-                            break
-                except socket.timeout:
-                    break
-                time.sleep(0.05)  # Pequeno delay entre tentativas
+            # CORREÇÃO: Usa sincronização por marcador
+            resposta = self.sincronizar_resposta(slave_addr, quantidade * 2)
             
-            if resposta:
-                self.logger.info(f"RX RTU COMPLETO ({len(resposta)} bytes): {resposta.hex(' ').upper()}")
-            else:
-                self.logger.warning("Nenhuma resposta recebida")
-            
-            return resposta if resposta else None
+            return resposta
             
         except socket.timeout:
             self.logger.error("Erro Modbus: timed out")
@@ -336,8 +413,6 @@ class ConexaoHF:
         """
         Lê um bloco de registradores holding (função 0x03) usando Modbus RTU.
         Retorna lista de valores inteiros ou None em caso de erro.
-        
-        CORREÇÃO: Rejeita dados com CRC inválido.
         """
         resposta = self.enviar_comando_modbus_rtu(0x03, endereco_inicial, quantidade)
         
@@ -363,9 +438,6 @@ class ConexaoHF:
         
         self.logger.debug(f"Slave={slave_addr}, FC=0x{function_code:02X}, ByteCount={byte_count}")
         
-        if byte_count != expected_bytes:
-            self.logger.warning(f"Byte count diferente: recebido={byte_count}, esperado={expected_bytes}")
-        
         # Verificar CRC da resposta
         dados_sem_crc = resposta[:-2]
         crc_recebido = resposta[-2] | (resposta[-1] << 8)
@@ -374,7 +446,7 @@ class ConexaoHF:
         if crc_recebido != crc_calculado:
             self.logger.error(f"CRC INVÁLIDO: recebido=0x{crc_recebido:04X}, calculado=0x{crc_calculado:04X}")
             self.logger.error(f"Resposta DESCARTADA: {resposta.hex(' ').upper()}")
-            return None  # CORREÇÃO: Rejeita dados corrompidos
+            return None
         
         self.logger.info(f"CRC OK: 0x{crc_recebido:04X}")
         
@@ -392,17 +464,6 @@ class ConexaoHF:
     def extrair_status_bits(self, status_word: int) -> Dict[str, bool]:
         """
         Extrai os bits de status conforme manual K30XL (registro 00017 / 0x0010)
-        
-        Bit 0:  Modo Automático
-        Bit 1:  Modo Manual  
-        Bit 2:  Modo Inibido
-        Bit 3:  Rede Alimentando Carga
-        Bit 4:  GMG Alimentando Carga
-        Bit 5:  Aviso Ativo (LED amarelo)
-        Bit 6:  Falha Ativa (LED vermelho)
-        Bit 8:  Motor em Funcionamento
-        Bit 10: Tensão GMG OK
-        Bit 12: Tensão Rede OK
         """
         return {
             "modo_automatico": bool(status_word & 0x0001),      # Bit 0
@@ -421,23 +482,22 @@ class ConexaoHF:
         """
         Lê todos os registradores K30XL em duas requisições (blocos).
         
-        Bloco 1: Endereços 0x0000-0x0008 (9 regs) - Tensões, Corrente, Freq, RPM, Temp
-        Bloco 2: Endereços 0x000D-0x0013 (7 regs) - Horímetro, Partidas, Status, Combustível
+        CORREÇÃO v2.2.0: Adiciona delay entre blocos para evitar dessincronização.
         """
         dados = {}
         
         # =========================================
         # BLOCO 1: Parâmetros Elétricos e Motor
         # =========================================
-        self.logger.info("Lendo Bloco 1 (0x0000-0x0008)...")
+        self.logger.info("=" * 50)
+        self.logger.info("=== Lendo Bloco 1 (0x0000-0x0008) ===")
         valores_bloco1 = self.ler_bloco_registradores(BLOCO1_ENDERECO, BLOCO1_QUANTIDADE)
         
         if not valores_bloco1:
             self.logger.error("Falha na leitura do Bloco 1")
             return dados
         
-        self.logger.info(f"Bloco 1: {len(valores_bloco1)} registradores lidos")
-        self.logger.info(f"  [DEBUG] Bloco 1 RAW: {[f'0x{v:04X}' for v in valores_bloco1]}")
+        self.logger.info(f"Bloco 1 RAW: {[f'0x{v:04X}' for v in valores_bloco1]}")
         
         # Mapear valores do Bloco 1
         for i, reg in enumerate(BLOCO1_REGISTRADORES):
@@ -445,96 +505,80 @@ class ConexaoHF:
                 valor_raw = valores_bloco1[i]
                 valor = valor_raw * reg.fator_escala
                 dados[reg.nome] = round(valor, 2) if reg.fator_escala != 1.0 else valor
-                self.logger.debug(f"  [0x{reg.endereco:04X}] {reg.nome}: {dados[reg.nome]} {reg.unidade}")
         
-        # Delay entre leituras (evitar sobrecarga no barramento)
-        time.sleep(0.2)
+        # CORREÇÃO v2.2.0: Delay maior entre blocos para buffer limpar
+        self.logger.info(f"Aguardando {DELAY_ENTRE_BLOCOS}s para buffer limpar...")
+        time.sleep(DELAY_ENTRE_BLOCOS)
         
         # =========================================
         # BLOCO 2: Horímetro, Partidas, Status, Combustível
         # =========================================
-        self.logger.info("Lendo Bloco 2 (0x000D-0x0013)...")
+        self.logger.info("=== Lendo Bloco 2 (0x000D-0x0013) ===")
         valores_bloco2 = self.ler_bloco_registradores(BLOCO2_ENDERECO, BLOCO2_QUANTIDADE)
         
         if not valores_bloco2:
             self.logger.error("Falha na leitura do Bloco 2")
-            # Retorna dados parciais do Bloco 1
             return dados
         
-        self.logger.info(f"Bloco 2: {len(valores_bloco2)} registradores lidos")
-        
-        # CORREÇÃO: Log de todos os bytes brutos para diagnóstico
-        self.logger.info(f"  [DEBUG] Bloco 2 RAW: {[f'0x{v:04X}' for v in valores_bloco2]}")
+        self.logger.info(f"Bloco 2 RAW: {[f'0x{v:04X}' for v in valores_bloco2]}")
         
         # Processar Bloco 2
         # Índice 0-1: Horímetro 32-bit (0x000D-0x000E) - segundos
         if len(valores_bloco2) >= 2:
-            # Log valores brutos para debug
-            self.logger.info(f"  [DEBUG] Reg 0x000D (raw): {valores_bloco2[0]} (0x{valores_bloco2[0]:04X})")
-            self.logger.info(f"  [DEBUG] Reg 0x000E (raw): {valores_bloco2[1]} (0x{valores_bloco2[1]:04X})")
+            self.logger.info(f"  Reg 0x000D: {valores_bloco2[0]} (0x{valores_bloco2[0]:04X})")
+            self.logger.info(f"  Reg 0x000E: {valores_bloco2[1]} (0x{valores_bloco2[1]:04X})")
             
             # Testar ambas as ordens de bytes
-            horimetro_big = (valores_bloco2[0] << 16) | valores_bloco2[1]  # Big-endian
-            horimetro_little = (valores_bloco2[1] << 16) | valores_bloco2[0]  # Little-endian
+            horimetro_big = (valores_bloco2[0] << 16) | valores_bloco2[1]
+            horimetro_little = (valores_bloco2[1] << 16) | valores_bloco2[0]
             
             horas_big = horimetro_big / 3600.0
             horas_little = horimetro_little / 3600.0
             
-            self.logger.info(f"  [DEBUG] Horímetro Big-Endian: {horimetro_big} seg = {horas_big:.2f} h")
-            self.logger.info(f"  [DEBUG] Horímetro Little-Endian: {horimetro_little} seg = {horas_little:.2f} h")
+            self.logger.info(f"  Horímetro Big-Endian: {horas_big:.2f} h")
+            self.logger.info(f"  Horímetro Little-Endian: {horas_little:.2f} h")
             
-            # CORREÇÃO: Escolher a interpretação que faz sentido físico
+            # Escolher a interpretação que faz sentido físico
             horas_trabalhadas = None
             
             if 0 < horas_big < MAX_HORIMETRO_HORAS:
                 horas_trabalhadas = round(horas_big, 2)
-                self.logger.info(f"  [VALIDADO] Usando Big-Endian: {horas_trabalhadas} h")
+                self.logger.info(f"  >>> USANDO Big-Endian: {horas_trabalhadas} h")
             elif 0 < horas_little < MAX_HORIMETRO_HORAS:
                 horas_trabalhadas = round(horas_little, 2)
-                self.logger.warning(f"  [VALIDADO] Usando Little-Endian: {horas_trabalhadas} h")
+                self.logger.warning(f"  >>> USANDO Little-Endian: {horas_trabalhadas} h")
             else:
-                self.logger.error(f"  [INVÁLIDO] Horímetro fora da faixa! Big={horas_big:.2f}h, Little={horas_little:.2f}h")
-                self.logger.error(f"  [INVÁLIDO] Valor NÃO será salvo no banco!")
+                self.logger.error(f"  >>> INVÁLIDO! Ambos fora da faixa válida")
             
-            # Só adiciona ao dicionário se for válido
             if horas_trabalhadas is not None:
                 dados["horas_trabalhadas"] = horas_trabalhadas
         
         # Índice 2: Partidas (0x000F)
         if len(valores_bloco2) >= 3:
             dados["numero_partidas"] = valores_bloco2[2]
-            self.logger.info(f"  [DEBUG] Reg 0x000F (Partidas) raw: {valores_bloco2[2]}")
+            self.logger.info(f"  Reg 0x000F (Partidas): {valores_bloco2[2]}")
         
         # Índice 3: Status Bits (0x0010)
         if len(valores_bloco2) >= 4:
             status_word = valores_bloco2[3]
-            self.logger.info(f"  [DEBUG] Reg 0x0010 (Status) raw: 0x{status_word:04X} = {status_word}")
+            self.logger.info(f"  Reg 0x0010 (Status): 0x{status_word:04X}")
             status_bits = self.extrair_status_bits(status_word)
             dados.update(status_bits)
-            self.logger.debug(f"  [0x0010] Status: 0x{status_word:04X} = {status_bits}")
         
-        # Índice 6: Nível Combustível (0x0013) - disponível a partir da versão 3.00
+        # Índice 6: Nível Combustível (0x0013)
         if len(valores_bloco2) >= 7:
             dados["nivel_combustivel"] = valores_bloco2[6]
-            self.logger.info(f"  [DEBUG] Reg 0x0013 (Combustível) raw: {valores_bloco2[6]}%")
+            self.logger.info(f"  Reg 0x0013 (Combustível): {valores_bloco2[6]}%")
         
         # =========================================
         # LOG RESUMIDO
         # =========================================
         self.logger.info("=" * 50)
-        self.logger.info("LEITURA K30XL COMPLETA:")
-        self.logger.info(f"  Tensão Rede R-S: {dados.get('tensao_rede_rs', 'N/A')} V")
-        self.logger.info(f"  Tensão GMG: {dados.get('tensao_gmg', 'N/A')} V")
-        self.logger.info(f"  Frequência: {dados.get('frequencia_gmg', 'N/A')} Hz")
-        self.logger.info(f"  RPM: {dados.get('rpm_motor', 'N/A')}")
-        self.logger.info(f"  Temperatura: {dados.get('temperatura_agua', 'N/A')} °C")
-        self.logger.info(f"  Bateria: {dados.get('tensao_bateria', 'N/A')} V")
+        self.logger.info("RESUMO LEITURA:")
         self.logger.info(f"  Horímetro: {dados.get('horas_trabalhadas', 'N/A')} h")
         self.logger.info(f"  Partidas: {dados.get('numero_partidas', 'N/A')}")
-        self.logger.info(f"  Combustível: {dados.get('nivel_combustivel', 'N/A')}%")
-        self.logger.info(f"  Motor Ligado: {dados.get('motor_funcionando', 'N/A')}")
-        self.logger.info(f"  Rede OK: {dados.get('rede_ok', 'N/A')}")
-        self.logger.info(f"  GMG Alimentando: {dados.get('gmg_alimentando', 'N/A')}")
+        self.logger.info(f"  Tensão Rede: {dados.get('tensao_rede_rs', 'N/A')} V")
+        self.logger.info(f"  Motor: {dados.get('motor_funcionando', 'N/A')}")
         self.logger.info("=" * 50)
         
         return dados
@@ -560,8 +604,6 @@ class ConexaoHF:
 def enviar_para_backend(porta_vps: str, dados: Dict[str, Any]) -> bool:
     """
     Envia os dados lidos para a edge function via HTTP POST
-    
-    O campo 'porta_vps' identifica qual gerador está enviando os dados
     """
     payload = {
         "porta_vps": porta_vps,
@@ -570,7 +612,6 @@ def enviar_para_backend(porta_vps: str, dados: Dict[str, Any]) -> bool:
     
     try:
         logger.info(f"Enviando dados do gerador porta {porta_vps}")
-        logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
         
         response = requests.post(
             EDGE_FUNCTION_URL,
@@ -616,15 +657,13 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
                     continue
             
             # Faz polling dos registradores
-            log.info("Lendo registradores Modbus K30XL...")
             dados = conexao.ler_todos_registradores()
             
             if dados:
                 log.info(f"Dados lidos: {len(dados)} parâmetros")
                 
-                # CORREÇÃO: Não envia em modo debug
                 if MODO_DEBUG:
-                    log.info("*** MODO DEBUG: Dados NÃO enviados para backend ***")
+                    log.info("*** MODO DEBUG: NÃO enviando para banco ***")
                 else:
                     enviar_para_backend(porta_vps, dados)
             else:
@@ -652,7 +691,7 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
 def main():
     """Inicia threads para cada gerador habilitado"""
     logger.info("=" * 60)
-    logger.info("VPS Modbus Reader - K30XL (Manual STEMAC)")
+    logger.info("VPS Modbus Reader - K30XL v2.2.0 (Sincronização por Marcador)")
     logger.info("IMPORTANTE: Configure HF2211 com baudrate 19200!")
     logger.info(f"Edge Function: {EDGE_FUNCTION_URL}")
     
@@ -709,7 +748,6 @@ def main():
 # =============================================================================
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -720,8 +758,8 @@ class HealthHandler(BaseHTTPRequestHandler):
             response = {
                 "status": "ok",
                 "service": "vps-modbus-reader",
-                "version": "2.1.0",  # Versão atualizada
-                "protocol": "Modbus RTU (K30XL Manual)",
+                "version": "2.2.0",
+                "protocol": "Modbus RTU (K30XL - Sync por Marcador)",
                 "debug_mode": MODO_DEBUG,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
@@ -731,7 +769,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
     
     def log_message(self, format, *args):
-        pass  # Silencia logs HTTP
+        pass
 
 
 def iniciar_health_api():
@@ -755,42 +793,35 @@ def testar_envio_simulado():
     logger.info("MODO TESTE - Enviando dados simulados K30XL")
     logger.info("=" * 60)
     
-    # Dados simulados baseados no manual K30XL
     dados_simulados = {
-        # Bloco 1 - Parâmetros elétricos
         "tensao_rede_rs": 220,
         "tensao_rede_st": 218,
         "tensao_rede_tr": 222,
-        "tensao_gmg": 0,          # Motor parado
-        "corrente_fase1": 0,      # Sem carga
-        "frequencia_gmg": 0.0,    # Motor parado
-        "rpm_motor": 0,           # Motor parado
-        "tensao_bateria": 12.8,   # Bateria OK
-        "temperatura_agua": 25,   # Ambiente
-        
-        # Bloco 2 - Horímetro, partidas, status
-        "horas_trabalhadas": 285.5,   # ~285 horas
+        "tensao_gmg": 0,
+        "corrente_fase1": 0,
+        "frequencia_gmg": 0.0,
+        "rpm_motor": 0,
+        "tensao_bateria": 12.8,
+        "temperatura_agua": 25,
+        "horas_trabalhadas": 285.5,
         "numero_partidas": 625,
-        "nivel_combustivel": 78,      # 78%
-        
-        # Status bits
+        "nivel_combustivel": 78,
         "modo_automatico": True,
         "modo_manual": False,
         "modo_inibido": False,
-        "rede_alimentando": True,     # Rede alimentando carga
-        "gmg_alimentando": False,     # GMG em standby
+        "rede_alimentando": True,
+        "gmg_alimentando": False,
         "aviso_ativo": False,
         "falha_ativa": False,
-        "motor_funcionando": False,   # Motor parado
-        "tensao_gmg_ok": False,       # GMG desligado
-        "rede_ok": True,              # Rede presente
+        "motor_funcionando": False,
+        "tensao_gmg_ok": False,
+        "rede_ok": True,
     }
     
     logger.info("Dados simulados:")
     for chave, valor in dados_simulados.items():
         logger.info(f"  {chave}: {valor}")
     
-    # Envia para porta 15002 (gerador K30XL)
     sucesso = enviar_para_backend("15002", dados_simulados)
     
     if sucesso:
@@ -811,7 +842,6 @@ if __name__ == "__main__":
     if "--teste" in sys.argv:
         testar_envio_simulado()
     elif "--debug" in sys.argv:
-        # CORREÇÃO: Ativa modo debug via argumento
         MODO_DEBUG = True
         logger.info("*" * 60)
         logger.info("*** MODO DEBUG ATIVADO VIA ARGUMENTO ***")

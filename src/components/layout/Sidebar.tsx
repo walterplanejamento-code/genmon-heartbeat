@@ -9,6 +9,7 @@ import {
   FileText,
   LogOut,
   Zap,
+  Activity,
 } from "lucide-react";
 
 const navigation = [
@@ -16,6 +17,7 @@ const navigation = [
   { name: "Gerador", href: "/generator", icon: Zap },
   { name: "Equipamento HF", href: "/hf-equipment", icon: Cpu },
   { name: "VPS", href: "/vps", icon: Server },
+  { name: "Diagnóstico", href: "/diagnostics", icon: Activity },
   { name: "Alertas", href: "/alerts", icon: AlertTriangle },
   { name: "Manuais", href: "/manuals", icon: FileText },
   { name: "Configurações", href: "/settings", icon: Settings },
