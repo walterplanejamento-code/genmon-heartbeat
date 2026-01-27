@@ -3,10 +3,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StatusIndicator } from "@/components/ui/StatusIndicator";
-import { Save, Zap } from "lucide-react";
-import { useState } from "react";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Save, Zap, Loader2 } from "lucide-react";
+import { useState, useEffect } from "react";
+import { useGenerator } from "@/hooks/useGenerator";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Generator() {
+  const { generator, isLoading, createGenerator, updateGenerator } = useGenerator();
+  const { toast } = useToast();
+  const [isSaving, setIsSaving] = useState(false);
+
   const [config, setConfig] = useState({
     marca: "MWM",
     modelo: "D229-4",
@@ -18,10 +25,80 @@ export default function Generator() {
     instrucoes: "Verificar nível de óleo antes de cada partida. Realizar manutenção preventiva a cada 250 horas.",
   });
 
-  const handleSave = () => {
-    // Will save to database
-    console.log("Saving config:", config);
+  // Sync form with database data
+  useEffect(() => {
+    if (generator) {
+      setConfig({
+        marca: generator.marca || "MWM",
+        modelo: generator.modelo || "D229-4",
+        controlador: generator.controlador || "STEMAC K30XL",
+        potenciaNominal: generator.potencia_nominal || "100",
+        tensaoNominal: generator.tensao_nominal || "380",
+        frequenciaNominal: generator.frequencia_nominal || "60",
+        combustivel: generator.combustivel || "Diesel",
+        instrucoes: generator.instrucoes || "",
+      });
+    }
+  }, [generator]);
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      if (generator) {
+        // Update existing generator
+        await updateGenerator(generator.id, {
+          marca: config.marca,
+          modelo: config.modelo,
+          controlador: config.controlador,
+          potencia_nominal: config.potenciaNominal,
+          tensao_nominal: config.tensaoNominal,
+          frequencia_nominal: config.frequenciaNominal,
+          combustivel: config.combustivel,
+          instrucoes: config.instrucoes,
+        });
+        toast({
+          title: "Configurações salvas",
+          description: "Os dados do gerador foram atualizados com sucesso.",
+        });
+      } else {
+        // Create new generator
+        await createGenerator({
+          marca: config.marca,
+          modelo: config.modelo,
+          controlador: config.controlador,
+          potencia_nominal: config.potenciaNominal,
+          tensao_nominal: config.tensaoNominal,
+          frequencia_nominal: config.frequenciaNominal,
+          combustivel: config.combustivel,
+          instrucoes: config.instrucoes,
+        });
+        toast({
+          title: "Gerador criado",
+          description: "O gerador foi configurado com sucesso.",
+        });
+      }
+    } catch (err) {
+      toast({
+        title: "Erro ao salvar",
+        description: "Não foi possível salvar as configurações. Tente novamente.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSaving(false);
+    }
   };
+
+  if (isLoading) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-6 max-w-4xl">
+          <Skeleton className="h-10 w-64" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-64 w-full" />
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
@@ -31,10 +108,10 @@ export default function Generator() {
           <div>
             <h1 className="text-2xl font-bold text-foreground">Configuração do Gerador</h1>
             <p className="text-muted-foreground">
-              Configure os parâmetros do gerador MWM D229-4
+              Configure os parâmetros do gerador {config.marca} {config.modelo}
             </p>
           </div>
-          <StatusIndicator status="online" label="Conectado" />
+          <StatusIndicator status={generator ? "online" : "offline"} label={generator ? "Configurado" : "Não configurado"} />
         </div>
 
         {/* Info card */}
@@ -174,9 +251,17 @@ export default function Generator() {
 
         {/* Save button */}
         <div className="flex justify-end">
-          <Button onClick={handleSave} className="bg-primary text-primary-foreground hover:bg-primary/90">
-            <Save className="w-4 h-4 mr-2" />
-            Salvar Configurações
+          <Button 
+            onClick={handleSave} 
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+            disabled={isSaving}
+          >
+            {isSaving ? (
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4 mr-2" />
+            )}
+            {isSaving ? "Salvando..." : "Salvar Configurações"}
           </Button>
         </div>
       </div>
