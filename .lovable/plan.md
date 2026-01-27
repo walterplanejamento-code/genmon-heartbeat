@@ -1,116 +1,116 @@
 
-# Plano: Descoberta do Horímetro Real - Scan Extendido
+# Plano: Corrigir Fluxo de Conexão no Script v2.4.0
 
 ## Problema Identificado
 
-O Reg 0x000D está variando a cada leitura mesmo com o gerador desligado, indicando que **não é o horímetro**. O horímetro real de 285:30h deve estar em outro registrador.
+O script v2.4.0 está tentando ler registradores **ANTES** do HF2211 conectar. Compare os logs:
 
-| Leitura | Reg 0x000D | Observação |
-|---------|------------|------------|
-| 18:31:19 | 0x0829 (2089) | Byte LOW 0x29 fixo |
-| 18:31:31 | 0x1529 (5417) | Byte LOW 0x29 fixo |
-| 18:31:43 | 0x2129 (8489) | Byte LOW 0x29 fixo |
+| Versão | Comportamento |
+|--------|---------------|
+| v2.2.0 | `Servidor iniciado` → `HF2211 conectado de (200.129.129.2)` → `Lendo Bloco 1` |
+| v2.4.0 | `Servidor iniciado` → `Lendo Bloco 1` → `Falha na leitura` ← HF nunca conectou! |
 
-O valor 0x29 (41 decimal) repetido no byte LOW sugere que pode ser um formato de **timestamp interno** (ex: segundos ou contador de ciclo).
-
----
-
-## Solução Proposta
-
-### 1. Atualizar Script para Scan Extendido (0x0000-0x003F)
-
-Expandir a varredura para 64 registradores para encontrar onde o horímetro realmente está armazenado:
-
-```text
-Bloco A: 0x0000-0x000F (16 regs) → Parâmetros elétricos
-Bloco B: 0x0010-0x001F (16 regs) → Partidas e status
-Bloco C: 0x0020-0x002F (16 regs) → Possível horímetro aqui?
-Bloco D: 0x0030-0x003F (16 regs) → Reservado/outros
-```
-
-### 2. Adicionar Formato BCD (Binary Coded Decimal)
-
-Alguns controladores industriais armazenam valores no formato BCD. Por exemplo:
-- 285:30 poderia ser armazenado como 0x0285 (hex) ou 0x2853 (hhmm invertido)
-
-### 3. Corrigir Versionamento
-
-Garantir que o script na VPS seja atualizado para a versão v2.4.0 com o scan extendido.
+A raiz do problema: O método `scan_registradores` loga "Lendo Bloco 1" (linha 498) mesmo quando `socket_cliente` é `None`, porque não verifica a conexão antes de tentar.
 
 ---
 
-## Arquivo a Modificar
+## Solução
 
-| Arquivo | Ação |
-|---------|------|
-| `docs/vps-modbus-reader.py` | Expandir scan para 64 registradores (4 blocos de 16) |
-| `docs/vps-modbus-reader.py` | Adicionar análise de formato BCD |
-| `docs/vps-modbus-reader.py` | Corrigir versão para v2.4.0 |
+### 1. Adicionar Verificação de Conexão em `ler_bloco_registradores`
 
----
-
-## Código: Função scan_registradores Atualizada
+O método precisa retornar `None` imediatamente se não houver conexão ativa, com log informativo:
 
 ```python
-def scan_registradores(self) -> None:
-    """
-    MODO SCAN v2.4.0: Lê registradores de 0x0000 a 0x003F (64 regs)
-    """
-    self.logger.info("=" * 70)
-    self.logger.info("=== MODO SCAN EXTENDIDO: 0x0000-0x003F (64 regs) ===")
-    self.logger.info("=" * 70)
+def ler_bloco_registradores(self, endereco_inicial: int, quantidade: int) -> Optional[list]:
+    """Lê um bloco de registradores holding (função 0x03)"""
+    # CORREÇÃO: Verificar conexão antes de tentar ler
+    if not self.cliente_conectado or not self.socket_cliente:
+        self.logger.warning("Sem conexão - aguardando HF2211...")
+        return None
     
-    # Ler 4 blocos de 16 registradores cada
-    for bloco_num in range(4):
-        endereco_base = bloco_num * 16
-        self.logger.info(f">>> Bloco {bloco_num+1}: 0x{endereco_base:04X}-0x{endereco_base+15:04X}")
-        
-        valores = self.ler_bloco_registradores(endereco_base, 16)
-        
-        if valores:
-            for i, val in enumerate(valores):
-                endereco = endereco_base + i
-                # Mostrar também interpretação BCD
-                bcd_str = f"{(val >> 12) & 0xF}{(val >> 8) & 0xF}:{(val >> 4) & 0xF}{val & 0xF}"
-                self.logger.info(
-                    f"  0x{endereco:04X}: {val:6d} (0x{val:04X}) BCD={bcd_str}"
-                )
-        
-        time.sleep(0.5)  # Delay entre blocos
+    resposta = self.enviar_comando_modbus_rtu(0x03, endereco_inicial, quantidade)
+    # ... resto do código
+```
+
+### 2. Aguardar Conexão Explicitamente no Modo SCAN
+
+Modificar o worker para garantir que a conexão seja estabelecida antes de chamar `scan_registradores`:
+
+```python
+# No worker_gerador (linha 809):
+if MODO_SCAN:
+    # Aguardar conexão antes do scan
+    while not conexao.cliente_conectado:
+        log.info("Aguardando HF2211 conectar para iniciar scan...")
+        if conexao.aceitar_conexao():
+            break
+        time.sleep(1)
     
-    # Análise especial: buscar valor próximo de 285
-    self.logger.info("=" * 70)
-    self.logger.info("=== ANÁLISE: Buscando valores ~285 ===")
-    # [código de análise]
+    conexao.scan_registradores()
+    log.info("Scan completo. Encerrando...")
+    break
 ```
 
 ---
 
-## Próximos Passos
+## Arquivos a Modificar
 
-1. Atualizar o script `docs/vps-modbus-reader.py` para v2.4.0
-2. Você copia o novo script para a VPS
-3. Rodar: `python3 /root/gmg-lovable/vps-modbus-reader.py --scan`
-4. Com os 64 registradores visíveis, identificamos exatamente onde está o horímetro de 285h
+| Arquivo | Alteração |
+|---------|-----------|
+| `docs/vps-modbus-reader.py` | Linha ~405: Adicionar log de "sem conexão" |
+| `docs/vps-modbus-reader.py` | Linha ~809: Aguardar conexão antes do scan |
+
+---
+
+## Fluxo Corrigido
+
+```text
+1. Script inicia servidor TCP na porta 15002
+2. Script exibe "Aguardando HF2211 conectar para iniciar scan..."
+3. HF2211 reconecta (~10-20 segundos após porta ficar disponível)
+4. Script exibe "HF2211 conectado de (IP)"
+5. Script executa scan_registradores() com 4 blocos de 16 regs
+6. Resultado: 64 registradores lidos com interpretação BCD
+```
+
+---
+
+## Após a Correção
+
+Depois de aplicar as correções e rodar o scan:
+
+```bash
+# Na VPS
+sudo systemctl stop gmg-lovable
+python3 /root/gmg-lovable/vps-modbus-reader.py --scan
+```
+
+Você verá:
+```
+Servidor TCP iniciado na porta 15002
+Aguardando HF2211 conectar para iniciar scan...
+HF2211 conectado de ('200.129.129.2', 5663)
+=== MODO SCAN EXTENDIDO v2.4.0 ===
+>>> BLOCO 1: 0x0000-0x000F
+  0x0000:      0 (0x0000)  BCD=00:00  HHMM=  0h00m
+  0x0001:    219 (0x00DB)  BCD=00:DB  HHMM=  2h19m
+  ... (64 registradores)
+=== ANÁLISE: BUSCANDO HORÍMETRO 285:30h ===
+CANDIDATOS A HORÍMETRO:
+  0x00XX: 285 (horas_direto)
+```
 
 ---
 
 ## Seção Técnica
 
-### Por que o Reg 0x000D está variando?
+### Por que o HF2211 não conectou a tempo?
 
-Algumas possibilidades:
-1. **Contador de ciclos internos**: Incrementa a cada execução do loop do controlador
-2. **Timestamp de comunicação**: Marca temporal da última requisição
-3. **Watchdog timer**: Contador que reseta periodicamente
+1. Quando você para o serviço `gmg-lovable`, a conexão TCP é fechada
+2. O HF2211 detecta a desconexão e entra em modo de reconexão
+3. O HF2211 tipicamente demora 10-30 segundos para tentar reconectar
+4. O script v2.4.0 não estava esperando essa reconexão
 
-### Onde o horímetro pode estar?
+### Timeout do Servidor
 
-Baseado em manuais de controladores similares:
-- **0x0020-0x0021**: Horímetro em alguns controladores
-- **0x0100+**: Área de parâmetros de configuração
-- O valor 285:30h = 17130 minutos = 0x42EA ou em formato especial
-
-### Interpretação do valor 625 (Partidas)
-
-Confirmado que 0x0010 = 0x0271 = 625 está correto e estável. Este mapeamento será mantido.
+O `socket_servidor.settimeout(5.0)` na linha 193 faz com que `accept()` bloqueie por apenas 5 segundos. Se o HF2211 não conectar nesse tempo, retorna `False` e o script deveria tentar novamente - mas o código de scan não estava respeitando esse loop.
