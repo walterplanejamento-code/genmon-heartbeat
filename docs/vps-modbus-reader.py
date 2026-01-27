@@ -21,7 +21,8 @@ Requisitos:
     pip install requests
 
 Uso:
-    python vps-modbus-reader.py          # Modo produção
+    python vps-modbus-reader.py          # Modo produção (envia para backend)
+    python vps-modbus-reader.py --debug  # Modo debug (NÃO envia para backend)
     python vps-modbus-reader.py --teste  # Enviar dados simulados
 
 Autor: Sistema de Monitoramento GMG
@@ -50,6 +51,9 @@ logger = logging.getLogger(__name__)
 
 # URL da Edge Function
 EDGE_FUNCTION_URL = "https://hwloajvxjsysutqfqpal.supabase.co/functions/v1/modbus-receiver"
+
+# Modo debug: não envia para backend, só mostra logs
+MODO_DEBUG = False
 
 # IP da VPS (onde este script roda)
 VPS_IP = "0.0.0.0"  # Escuta em todas as interfaces
@@ -85,6 +89,9 @@ GERADORES_CONFIG = {
 
 # Intervalo entre leituras (segundos)
 INTERVALO_LEITURA = 10
+
+# Limite máximo razoável para horímetro (em horas)
+MAX_HORIMETRO_HORAS = 500000  # ~57 anos
 
 # =============================================================================
 # MAPEAMENTO DE REGISTRADORES K30XL - MANUAL OFICIAL STEMAC
@@ -223,6 +230,37 @@ class ConexaoHF:
                     crc >>= 1
         return crc
     
+    def limpar_buffer_socket(self):
+        """
+        CORREÇÃO: Limpa bytes residuais do socket antes de nova leitura.
+        Isso evita que bytes de respostas anteriores contaminem a próxima leitura.
+        """
+        if not self.socket_cliente:
+            return
+        
+        try:
+            self.socket_cliente.setblocking(False)
+            bytes_descartados = 0
+            while True:
+                try:
+                    lixo = self.socket_cliente.recv(256)
+                    if lixo:
+                        bytes_descartados += len(lixo)
+                        self.logger.warning(f"Bytes residuais descartados: {lixo.hex(' ').upper()}")
+                    else:
+                        break
+                except BlockingIOError:
+                    break
+            
+            self.socket_cliente.setblocking(True)
+            self.socket_cliente.settimeout(self.config["timeout"])
+            
+            if bytes_descartados > 0:
+                self.logger.warning(f"Total de {bytes_descartados} bytes residuais limpos do buffer")
+                
+        except Exception as e:
+            self.logger.debug(f"Erro ao limpar buffer: {e}")
+    
     def enviar_comando_modbus_rtu(self, funcao: int, endereco: int, quantidade: int) -> Optional[bytes]:
         """
         Envia comando Modbus RTU através do socket (modo transparente HF2211).
@@ -230,7 +268,7 @@ class ConexaoHF:
         Frame RTU: [Slave Addr (1)] [Function (1)] [Start Addr (2)] [Qty (2)] [CRC-16 (2)]
         Resposta:  [Slave Addr (1)] [Function (1)] [ByteCount (1)] [Data (N*2)] [CRC-16 (2)]
         
-        CORREÇÃO: Aguarda tamanho completo da resposta baseado na quantidade de registradores.
+        CORREÇÃO: Limpa buffer antes de enviar e aguarda tamanho completo da resposta.
         """
         if not self.cliente_conectado or not self.socket_cliente:
             return None
@@ -256,6 +294,9 @@ class ConexaoHF:
         tamanho_esperado = 5 + (quantidade * 2)
         
         try:
+            # CORREÇÃO: Limpa buffer antes de enviar novo comando
+            self.limpar_buffer_socket()
+            
             self.logger.debug(f"TX RTU: {frame.hex(' ').upper()}")
             self.logger.debug(f"Aguardando {tamanho_esperado} bytes de resposta...")
             self.socket_cliente.send(frame)
@@ -269,7 +310,7 @@ class ConexaoHF:
                     if chunk:
                         resposta += chunk
                         self.logger.debug(f"Recebido chunk: {len(chunk)} bytes, total: {len(resposta)}/{tamanho_esperado}")
-                        # CORREÇÃO: Aguarda tamanho completo baseado na quantidade de registradores
+                        # Aguarda tamanho completo baseado na quantidade de registradores
                         if len(resposta) >= tamanho_esperado:
                             break
                 except socket.timeout:
@@ -277,7 +318,7 @@ class ConexaoHF:
                 time.sleep(0.05)  # Pequeno delay entre tentativas
             
             if resposta:
-                self.logger.debug(f"RX RTU ({len(resposta)} bytes): {resposta.hex(' ').upper()}")
+                self.logger.info(f"RX RTU COMPLETO ({len(resposta)} bytes): {resposta.hex(' ').upper()}")
             else:
                 self.logger.warning("Nenhuma resposta recebida")
             
@@ -295,6 +336,8 @@ class ConexaoHF:
         """
         Lê um bloco de registradores holding (função 0x03) usando Modbus RTU.
         Retorna lista de valores inteiros ou None em caso de erro.
+        
+        CORREÇÃO: Rejeita dados com CRC inválido.
         """
         resposta = self.enviar_comando_modbus_rtu(0x03, endereco_inicial, quantidade)
         
@@ -330,8 +373,10 @@ class ConexaoHF:
         
         if crc_recebido != crc_calculado:
             self.logger.error(f"CRC INVÁLIDO: recebido=0x{crc_recebido:04X}, calculado=0x{crc_calculado:04X}")
-            self.logger.error(f"Resposta descartada: {resposta.hex(' ').upper()}")
+            self.logger.error(f"Resposta DESCARTADA: {resposta.hex(' ').upper()}")
             return None  # CORREÇÃO: Rejeita dados corrompidos
+        
+        self.logger.info(f"CRC OK: 0x{crc_recebido:04X}")
         
         # Extrair valores (big-endian unsigned 16-bit)
         valores = []
@@ -392,6 +437,7 @@ class ConexaoHF:
             return dados
         
         self.logger.info(f"Bloco 1: {len(valores_bloco1)} registradores lidos")
+        self.logger.info(f"  [DEBUG] Bloco 1 RAW: {[f'0x{v:04X}' for v in valores_bloco1]}")
         
         # Mapear valores do Bloco 1
         for i, reg in enumerate(BLOCO1_REGISTRADORES):
@@ -431,15 +477,30 @@ class ConexaoHF:
             horimetro_big = (valores_bloco2[0] << 16) | valores_bloco2[1]  # Big-endian
             horimetro_little = (valores_bloco2[1] << 16) | valores_bloco2[0]  # Little-endian
             
-            self.logger.info(f"  [DEBUG] Horímetro Big-Endian: {horimetro_big} seg = {horimetro_big/3600:.2f} h")
-            self.logger.info(f"  [DEBUG] Horímetro Little-Endian: {horimetro_little} seg = {horimetro_little/3600:.2f} h")
+            horas_big = horimetro_big / 3600.0
+            horas_little = horimetro_little / 3600.0
             
-            # Usar big-endian (padrão Modbus)
-            horimetro_segundos = horimetro_big
-            horas_trabalhadas = round(horimetro_segundos / 3600.0, 2)
-            dados["horas_trabalhadas"] = horas_trabalhadas
+            self.logger.info(f"  [DEBUG] Horímetro Big-Endian: {horimetro_big} seg = {horas_big:.2f} h")
+            self.logger.info(f"  [DEBUG] Horímetro Little-Endian: {horimetro_little} seg = {horas_little:.2f} h")
+            
+            # CORREÇÃO: Escolher a interpretação que faz sentido físico
+            horas_trabalhadas = None
+            
+            if 0 < horas_big < MAX_HORIMETRO_HORAS:
+                horas_trabalhadas = round(horas_big, 2)
+                self.logger.info(f"  [VALIDADO] Usando Big-Endian: {horas_trabalhadas} h")
+            elif 0 < horas_little < MAX_HORIMETRO_HORAS:
+                horas_trabalhadas = round(horas_little, 2)
+                self.logger.warning(f"  [VALIDADO] Usando Little-Endian: {horas_trabalhadas} h")
+            else:
+                self.logger.error(f"  [INVÁLIDO] Horímetro fora da faixa! Big={horas_big:.2f}h, Little={horas_little:.2f}h")
+                self.logger.error(f"  [INVÁLIDO] Valor NÃO será salvo no banco!")
+            
+            # Só adiciona ao dicionário se for válido
+            if horas_trabalhadas is not None:
+                dados["horas_trabalhadas"] = horas_trabalhadas
         
-        # Índice 2: Partidas (0x000F) - CORREÇÃO: Log como INFO para aparecer nos logs
+        # Índice 2: Partidas (0x000F)
         if len(valores_bloco2) >= 3:
             dados["numero_partidas"] = valores_bloco2[2]
             self.logger.info(f"  [DEBUG] Reg 0x000F (Partidas) raw: {valores_bloco2[2]}")
@@ -447,6 +508,7 @@ class ConexaoHF:
         # Índice 3: Status Bits (0x0010)
         if len(valores_bloco2) >= 4:
             status_word = valores_bloco2[3]
+            self.logger.info(f"  [DEBUG] Reg 0x0010 (Status) raw: 0x{status_word:04X} = {status_word}")
             status_bits = self.extrair_status_bits(status_word)
             dados.update(status_bits)
             self.logger.debug(f"  [0x0010] Status: 0x{status_word:04X} = {status_bits}")
@@ -454,7 +516,7 @@ class ConexaoHF:
         # Índice 6: Nível Combustível (0x0013) - disponível a partir da versão 3.00
         if len(valores_bloco2) >= 7:
             dados["nivel_combustivel"] = valores_bloco2[6]
-            self.logger.debug(f"  [0x0013] Combustível: {valores_bloco2[6]}%")
+            self.logger.info(f"  [DEBUG] Reg 0x0013 (Combustível) raw: {valores_bloco2[6]}%")
         
         # =========================================
         # LOG RESUMIDO
@@ -559,7 +621,12 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
             
             if dados:
                 log.info(f"Dados lidos: {len(dados)} parâmetros")
-                enviar_para_backend(porta_vps, dados)
+                
+                # CORREÇÃO: Não envia em modo debug
+                if MODO_DEBUG:
+                    log.info("*** MODO DEBUG: Dados NÃO enviados para backend ***")
+                else:
+                    enviar_para_backend(porta_vps, dados)
             else:
                 log.warning("Nenhum dado lido, conexão pode ter sido perdida")
                 conexao.cliente_conectado = False
@@ -588,6 +655,12 @@ def main():
     logger.info("VPS Modbus Reader - K30XL (Manual STEMAC)")
     logger.info("IMPORTANTE: Configure HF2211 com baudrate 19200!")
     logger.info(f"Edge Function: {EDGE_FUNCTION_URL}")
+    
+    if MODO_DEBUG:
+        logger.info("*" * 60)
+        logger.info("*** MODO DEBUG ATIVADO - DADOS NÃO SERÃO SALVOS ***")
+        logger.info("*" * 60)
+    
     logger.info("=" * 60)
     
     # Lista geradores habilitados
@@ -647,8 +720,9 @@ class HealthHandler(BaseHTTPRequestHandler):
             response = {
                 "status": "ok",
                 "service": "vps-modbus-reader",
-                "version": "2.0.0",
+                "version": "2.1.0",  # Versão atualizada
                 "protocol": "Modbus RTU (K30XL Manual)",
+                "debug_mode": MODO_DEBUG,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
             self.wfile.write(json.dumps(response).encode())
@@ -736,5 +810,13 @@ if __name__ == "__main__":
     
     if "--teste" in sys.argv:
         testar_envio_simulado()
+    elif "--debug" in sys.argv:
+        # CORREÇÃO: Ativa modo debug via argumento
+        MODO_DEBUG = True
+        logger.info("*" * 60)
+        logger.info("*** MODO DEBUG ATIVADO VIA ARGUMENTO ***")
+        logger.info("*** DADOS NÃO SERÃO SALVOS NO BANCO ***")
+        logger.info("*" * 60)
+        main()
     else:
         main()
