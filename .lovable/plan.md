@@ -1,119 +1,150 @@
 
-# Plano de Correção: Leituras Modbus K30XL
+# Plano de Ação: Estabilização das Leituras Modbus K30XL
 
-## Diagnóstico dos Problemas
+## Problema Atual
 
-### Problema 1: Recebimento Incompleto de Dados
-O loop de recebimento para quando recebe **5 bytes**, mas as respostas Modbus são maiores:
-- **Bloco 1** (9 registradores): 1 + 1 + 1 + 18 + 2 = **23 bytes**
-- **Bloco 2** (7 registradores): 1 + 1 + 1 + 14 + 2 = **19 bytes**
+O horímetro continua oscilando mesmo após as correções anteriores. Isso indica que ainda há **dessincronização de bytes** no socket TCP.
 
-Isso explica porque o horímetro oscila - às vezes recebe bytes completos, às vezes parciais.
+## Causa Raiz Identificada
 
-### Problema 2: Partidas Não Aparecendo
-O log de partidas usa `logger.debug()` que não é exibido. Além disso, se os dados estão incompletos (problema 1), o valor pode estar corrompido.
+O socket TCP pode ter **bytes residuais** de leituras anteriores que "contaminam" a próxima leitura. Quando o CRC falha, descartamos, mas o próximo frame começa com os bytes residuais do anterior, causando leituras erradas com CRC que por acaso bate.
 
-### Problema 3: CRC Ignorado
-Dados com CRC inválido são processados mesmo assim, causando valores aleatórios.
+## Solução Definitiva: Modo Debug Completo (Sem Salvar no Banco)
 
----
+### Correção 1: Limpar Buffer Antes de Cada Leitura
 
-## Solução Proposta
+Adicionar limpeza do socket antes de enviar cada comando Modbus para evitar bytes residuais.
 
-### Correção 1: Calcular Tamanho Esperado da Resposta
+### Correção 2: Modo "Somente Log" (Não Envia para Backend)
 
-Modificar o método `enviar_comando_modbus_rtu` para:
-1. Calcular o tamanho exato esperado da resposta baseado na quantidade de registradores
-2. Aguardar até receber todos os bytes ou timeout
-3. Log dos bytes brutos recebidos para debug
+Adicionar flag `--debug` que:
+- Lê dados reais do controlador
+- Mostra TODOS os bytes brutos no log
+- **NÃO envia para o banco de dados**
 
-```python
-# Antes (linha 258-265):
-if len(resposta) >= 5:
-    break
+### Correção 3: Validação de Valores Físicos
 
-# Depois:
-# Calcular tamanho esperado: addr(1) + fc(1) + bytecount(1) + data(qty*2) + crc(2)
-tamanho_esperado = 5 + (quantidade * 2)
-if len(resposta) >= tamanho_esperado:
-    break
-```
+Adicionar verificação de faixa para detectar valores impossíveis:
+- Horímetro: 0 a 999.999 horas (valor máximo físico razoável)
+- Se o valor estiver fora da faixa, descarta a leitura
 
-### Correção 2: Rejeitar Dados com CRC Inválido
+### Correção 4: Log Hexadecimal Completo da Resposta
 
-Modificar `ler_bloco_registradores` para:
-1. Rejeitar respostas com CRC inválido (retornar None)
-2. Forçar nova tentativa na próxima iteração
+Mostrar a resposta raw COMPLETA antes de processar para verificar visualmente se os dados estão corretos.
+
+## Arquivo a Modificar
+
+`docs/vps-modbus-reader.py`
+
+## Alterações Específicas
+
+### 1. Nova Variável Global (após linha 52)
 
 ```python
-# Antes (linha 322-324):
-if crc_recebido != crc_calculado:
-    self.logger.warning(f"CRC inválido...")
-    # Continua mesmo com CRC errado para debug
-
-# Depois:
-if crc_recebido != crc_calculado:
-    self.logger.error(f"CRC inválido: recebido=0x{crc_recebido:04X}, calculado=0x{crc_calculado:04X}")
-    self.logger.error(f"Resposta descartada: {resposta.hex(' ').upper()}")
-    return None  # Rejeita dados corrompidos
+# Modo debug: não envia para backend, só mostra logs
+MODO_DEBUG = False
 ```
 
-### Correção 3: Log Detalhado de Partidas
-
-Mudar o log de partidas de `debug` para `info`:
+### 2. Função de Limpeza de Buffer (antes da linha 225)
 
 ```python
-# Antes (linha 432):
-self.logger.debug(f"  [0x000F] Partidas: {valores_bloco2[2]}")
-
-# Depois:
-self.logger.info(f"  [DEBUG] Reg 0x000F (Partidas) raw: {valores_bloco2[2]}")
+def limpar_buffer_socket(self):
+    """Limpa bytes residuais do socket antes de nova leitura"""
+    if not self.socket_cliente:
+        return
+    try:
+        self.socket_cliente.setblocking(False)
+        while True:
+            try:
+                lixo = self.socket_cliente.recv(256)
+                if lixo:
+                    self.logger.warning(f"Bytes residuais descartados: {lixo.hex(' ').upper()}")
+                else:
+                    break
+            except BlockingIOError:
+                break
+        self.socket_cliente.setblocking(True)
+        self.socket_cliente.settimeout(0.5)
+    except Exception as e:
+        self.logger.debug(f"Erro ao limpar buffer: {e}")
 ```
 
-### Correção 4: Log dos Bytes Brutos do Bloco 2
-
-Adicionar log de todos os bytes brutos recebidos para diagnóstico:
+### 3. Chamar Limpeza Antes de Cada Comando (linha 258, antes de send)
 
 ```python
-# Após linha 408, adicionar:
-self.logger.info(f"  [DEBUG] Bloco 2 raw bytes: {[f'0x{v:04X}' for v in valores_bloco2]}")
+# Limpa buffer antes de enviar
+self.limpar_buffer_socket()
 ```
 
----
+### 4. Validação de Horímetro (linhas 425-440)
 
-## Arquivos a Modificar
+```python
+# Validar faixa física do horímetro
+MAX_HORIMETRO_HORAS = 500000  # Limite razoável: ~57 anos
 
-| Arquivo | Linhas | Alteração |
-|---------|--------|-----------|
-| `docs/vps-modbus-reader.py` | 234-275 | Modificar `enviar_comando_modbus_rtu` para receber quantidade e calcular tamanho esperado |
-| `docs/vps-modbus-reader.py` | 285-290 | Passar quantidade para o método de envio |
-| `docs/vps-modbus-reader.py` | 322-325 | Rejeitar CRC inválido |
-| `docs/vps-modbus-reader.py` | 408-432 | Adicionar logs DEBUG detalhados |
+horimetro_big = (valores_bloco2[0] << 16) | valores_bloco2[1]
+horimetro_little = (valores_bloco2[1] << 16) | valores_bloco2[0]
 
----
+horas_big = horimetro_big / 3600.0
+horas_little = horimetro_little / 3600.0
+
+self.logger.info(f"  [DEBUG] Horímetro Big-Endian: {horas_big:.2f} h")
+self.logger.info(f"  [DEBUG] Horímetro Little-Endian: {horas_little:.2f} h")
+
+# Escolher a interpretação que faz sentido físico
+if 0 < horas_big < MAX_HORIMETRO_HORAS:
+    horas_trabalhadas = round(horas_big, 2)
+elif 0 < horas_little < MAX_HORIMETRO_HORAS:
+    horas_trabalhadas = round(horas_little, 2)
+    self.logger.warning("Usando Little-Endian para horímetro!")
+else:
+    self.logger.error(f"Horímetro INVÁLIDO! Big={horas_big:.2f}h, Little={horas_little:.2f}h")
+    horas_trabalhadas = None  # Não salva valor inválido
+
+if horas_trabalhadas is not None:
+    dados["horas_trabalhadas"] = horas_trabalhadas
+```
+
+### 5. Não Enviar em Modo Debug (linha 562)
+
+```python
+if dados:
+    log.info(f"Dados lidos: {len(dados)} parâmetros")
+    if not MODO_DEBUG:
+        enviar_para_backend(porta_vps, dados)
+    else:
+        log.info("MODO DEBUG: Dados NÃO enviados para backend")
+```
+
+### 6. Ativar Modo Debug pelo Argumento (linhas 734-740)
+
+```python
+if __name__ == "__main__":
+    import sys
+    
+    if "--teste" in sys.argv:
+        testar_envio_simulado()
+    elif "--debug" in sys.argv:
+        MODO_DEBUG = True
+        logger.info("*** MODO DEBUG ATIVADO - Dados NÃO serão salvos ***")
+        main()
+    else:
+        main()
+```
+
+## Instruções de Implantação
+
+1. Copiar o código completo atualizado para a VPS
+2. Parar o serviço: `systemctl stop gmg-lovable`
+3. Atualizar: `nano /root/gmg-lovable/vps-modbus-reader.py`
+4. Testar em modo debug: `python3 /root/gmg-lovable/vps-modbus-reader.py --debug`
+5. Monitorar os logs no terminal
+6. Se os dados estabilizarem, rodar sem `--debug` para enviar ao backend
 
 ## Resultado Esperado
 
-Após as correções:
-1. **Horímetro estável** - Dados completos e validados por CRC
-2. **Partidas visíveis** - Logs mostrarão o valor real do registrador 0x000F
-3. **Dados confiáveis** - Apenas leituras com CRC válido serão processadas
-
----
-
-## Passos de Implementação
-
-1. Atualizar `docs/vps-modbus-reader.py` com todas as correções
-2. Copiar para a VPS: `nano /root/gmg-lovable/vps-modbus-reader.py`
-3. Reiniciar serviço: `systemctl restart gmg-lovable`
-4. Verificar logs: `journalctl -u gmg-lovable -f`
-
-Os logs agora mostrarão:
-```
-[DEBUG] Bloco 2 raw bytes: [0x0000, 0x1A2B, 0x001F, 0x0050, ...]
-[DEBUG] Reg 0x000D (raw): 0 (0x0000)
-[DEBUG] Reg 0x000E (raw): 6699 (0x1A2B)
-[DEBUG] Reg 0x000F (Partidas) raw: 31
-```
-
-Com esses valores brutos, poderemos identificar a ordem correta dos bytes e confirmar se as partidas estão sendo lidas.
+Com essas correções:
+1. **Buffer limpo** antes de cada leitura = sem contaminação de bytes
+2. **Valores impossíveis rejeitados** = só dados válidos
+3. **Modo debug** = testar sem poluir o banco
+4. **Logs completos** = ver exatamente o que chega do controlador
