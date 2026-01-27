@@ -228,6 +228,9 @@ class ConexaoHF:
         Envia comando Modbus RTU através do socket (modo transparente HF2211).
         
         Frame RTU: [Slave Addr (1)] [Function (1)] [Start Addr (2)] [Qty (2)] [CRC-16 (2)]
+        Resposta:  [Slave Addr (1)] [Function (1)] [ByteCount (1)] [Data (N*2)] [CRC-16 (2)]
+        
+        CORREÇÃO: Aguarda tamanho completo da resposta baseado na quantidade de registradores.
         """
         if not self.cliente_conectado or not self.socket_cliente:
             return None
@@ -248,8 +251,13 @@ class ConexaoHF:
         crc = self.calcular_crc16(pdu)
         frame = pdu + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
         
+        # Calcula tamanho esperado da resposta:
+        # [Slave(1)] + [FC(1)] + [ByteCount(1)] + [Data(qty*2)] + [CRC(2)]
+        tamanho_esperado = 5 + (quantidade * 2)
+        
         try:
             self.logger.debug(f"TX RTU: {frame.hex(' ').upper()}")
+            self.logger.debug(f"Aguardando {tamanho_esperado} bytes de resposta...")
             self.socket_cliente.send(frame)
             
             # Aguarda resposta RTU com loop de recebimento gradual
@@ -260,15 +268,16 @@ class ConexaoHF:
                     chunk = self.socket_cliente.recv(256)
                     if chunk:
                         resposta += chunk
-                        # Resposta mínima válida: 5 bytes (addr + fc + bytecount + data + crc)
-                        if len(resposta) >= 5:
+                        self.logger.debug(f"Recebido chunk: {len(chunk)} bytes, total: {len(resposta)}/{tamanho_esperado}")
+                        # CORREÇÃO: Aguarda tamanho completo baseado na quantidade de registradores
+                        if len(resposta) >= tamanho_esperado:
                             break
                 except socket.timeout:
                     break
                 time.sleep(0.05)  # Pequeno delay entre tentativas
             
             if resposta:
-                self.logger.debug(f"RX RTU: {resposta.hex(' ').upper()}")
+                self.logger.debug(f"RX RTU ({len(resposta)} bytes): {resposta.hex(' ').upper()}")
             else:
                 self.logger.warning("Nenhuma resposta recebida")
             
@@ -320,8 +329,9 @@ class ConexaoHF:
         crc_calculado = self.calcular_crc16(dados_sem_crc)
         
         if crc_recebido != crc_calculado:
-            self.logger.warning(f"CRC inválido: recebido=0x{crc_recebido:04X}, calculado=0x{crc_calculado:04X}")
-            # Continua mesmo com CRC errado para debug
+            self.logger.error(f"CRC INVÁLIDO: recebido=0x{crc_recebido:04X}, calculado=0x{crc_calculado:04X}")
+            self.logger.error(f"Resposta descartada: {resposta.hex(' ').upper()}")
+            return None  # CORREÇÃO: Rejeita dados corrompidos
         
         # Extrair valores (big-endian unsigned 16-bit)
         valores = []
@@ -407,6 +417,9 @@ class ConexaoHF:
         
         self.logger.info(f"Bloco 2: {len(valores_bloco2)} registradores lidos")
         
+        # CORREÇÃO: Log de todos os bytes brutos para diagnóstico
+        self.logger.info(f"  [DEBUG] Bloco 2 RAW: {[f'0x{v:04X}' for v in valores_bloco2]}")
+        
         # Processar Bloco 2
         # Índice 0-1: Horímetro 32-bit (0x000D-0x000E) - segundos
         if len(valores_bloco2) >= 2:
@@ -426,10 +439,10 @@ class ConexaoHF:
             horas_trabalhadas = round(horimetro_segundos / 3600.0, 2)
             dados["horas_trabalhadas"] = horas_trabalhadas
         
-        # Índice 2: Partidas (0x000F)
+        # Índice 2: Partidas (0x000F) - CORREÇÃO: Log como INFO para aparecer nos logs
         if len(valores_bloco2) >= 3:
             dados["numero_partidas"] = valores_bloco2[2]
-            self.logger.debug(f"  [0x000F] Partidas: {valores_bloco2[2]}")
+            self.logger.info(f"  [DEBUG] Reg 0x000F (Partidas) raw: {valores_bloco2[2]}")
         
         # Índice 3: Status Bits (0x0010)
         if len(valores_bloco2) >= 4:
