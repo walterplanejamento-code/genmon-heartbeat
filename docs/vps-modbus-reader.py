@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.3.0
+Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.4.0
 =====================================================
 
 Este script roda na VPS (82.25.70.90) em MODO ATIVO:
@@ -17,10 +17,11 @@ IMPORTANTE: Configuração do HF2211
 Arquitetura:
     [Gerador] → [K30XL] → [RS-232] → [HF2211] → [Internet] → [VPS:15002] → [Backend]
 
-CORREÇÃO v2.3.0: Mapeamento corrigido baseado em medições físicas
-- Partidas está no Reg 0x0010 (não 0x000F)
-- Horímetro testado em minutos (14624 / 60 = 243.7h)
-- Modo --scan para identificar todos os registradores
+CORREÇÃO v2.4.0: Scan extendido para descoberta do horímetro
+- Reg 0x000D está variando (não é horímetro!)
+- Scan de 64 registradores (0x0000-0x003F) em 4 blocos
+- Análise BCD para formato industrial
+- Partidas confirmado em Reg 0x0010 = 625
 
 Requisitos:
     pip install requests
@@ -29,7 +30,7 @@ Uso:
     python vps-modbus-reader.py          # Modo produção (envia para backend)
     python vps-modbus-reader.py --debug  # Modo debug (NÃO envia para backend)
     python vps-modbus-reader.py --teste  # Enviar dados simulados
-    python vps-modbus-reader.py --scan   # Varrer registradores 0x0000-0x001F
+    python vps-modbus-reader.py --scan   # Scan EXTENDIDO 0x0000-0x003F (64 regs)
 
 Autor: Sistema de Monitoramento GMG
 Baseado no Manual STEMAC K30XL versão 1.0 a 3.01
@@ -473,87 +474,132 @@ class ConexaoHF:
     
     def scan_registradores(self) -> None:
         """
-        MODO SCAN v2.3.0: Lê registradores de 0x0000 a 0x001F e mostra todos os valores.
-        Usado para identificar o mapeamento correto do controlador.
+        MODO SCAN v2.4.0: Lê registradores de 0x0000 a 0x003F (64 regs) em 4 blocos.
+        Adiciona interpretação BCD para formatos industriais.
+        
+        O objetivo é descobrir onde está o horímetro real (285:30h).
+        O Reg 0x000D foi identificado como um contador variável (não é horímetro).
         """
         self.logger.info("=" * 70)
         self.logger.info("=" * 70)
-        self.logger.info("=== MODO SCAN: VARRENDO REGISTRADORES 0x0000-0x001F ===")
+        self.logger.info("=== MODO SCAN EXTENDIDO v2.4.0: 0x0000-0x003F (64 regs) ===")
+        self.logger.info("=== Buscando horímetro real de 285:30h ===")
         self.logger.info("=" * 70)
         
-        # Lê primeiro bloco: 0x0000 a 0x000F (16 registradores)
-        self.logger.info(">>> Lendo bloco 0x0000-0x000F (16 registradores)...")
-        valores_bloco1 = self.ler_bloco_registradores(0x0000, 16)
+        todos_valores = {}  # Armazena todos os valores lidos
         
-        if valores_bloco1:
-            self.logger.info("-" * 50)
-            self.logger.info("BLOCO 1 (0x0000-0x000F):")
-            for i, val in enumerate(valores_bloco1):
-                endereco = 0x0000 + i
-                self.logger.info(f"  Reg 0x{endereco:04X} (dec {endereco:5d}): {val:6d} (0x{val:04X})")
-            self.logger.info("-" * 50)
+        # Ler 4 blocos de 16 registradores cada
+        for bloco_num in range(4):
+            endereco_base = bloco_num * 16
+            self.logger.info("-" * 60)
+            self.logger.info(f">>> BLOCO {bloco_num + 1}: 0x{endereco_base:04X}-0x{endereco_base + 15:04X}")
+            self.logger.info("-" * 60)
+            
+            valores = self.ler_bloco_registradores(endereco_base, 16)
+            
+            if valores:
+                for i, val in enumerate(valores):
+                    endereco = endereco_base + i
+                    todos_valores[endereco] = val
+                    
+                    # Interpretação BCD: extrai cada nibble como dígito decimal
+                    bcd_d3 = (val >> 12) & 0xF
+                    bcd_d2 = (val >> 8) & 0xF
+                    bcd_d1 = (val >> 4) & 0xF
+                    bcd_d0 = val & 0xF
+                    bcd_str = f"{bcd_d3}{bcd_d2}:{bcd_d1}{bcd_d0}"
+                    
+                    # Também mostrar como HH:MM se for formato horário
+                    hhmm_h = val // 100
+                    hhmm_m = val % 100
+                    
+                    self.logger.info(
+                        f"  0x{endereco:04X}: {val:6d} (0x{val:04X})  "
+                        f"BCD={bcd_str}  HHMM={hhmm_h:3d}h{hhmm_m:02d}m"
+                    )
+            else:
+                self.logger.error(f"Falha ao ler bloco {bloco_num + 1}")
+            
+            # Delay entre blocos
+            time.sleep(DELAY_ENTRE_BLOCOS)
+        
+        # ============================================
+        # ANÁLISE ESPECIAL: Buscar valores próximos de 285
+        # ============================================
+        self.logger.info("=" * 70)
+        self.logger.info("=== ANÁLISE: BUSCANDO HORÍMETRO 285:30h ===")
+        self.logger.info("=" * 70)
+        
+        # Valores possíveis para horímetro de 285:30h:
+        # - 285 (horas inteiras)
+        # - 28530 (formato HHMM: 285h 30m)
+        # - 17130 (minutos totais: 285*60 + 30)
+        # - 0x011D = 285 em hex
+        # - 0x42EA = 17130 em hex
+        # - BCD: 0x0285 ou 0x2853
+        
+        candidatos_horimetro = []
+        
+        for endereco, val in todos_valores.items():
+            notas = []
+            
+            # Valor próximo de 285 (horas)
+            if 280 <= val <= 290:
+                notas.append(f"~285h direto")
+                candidatos_horimetro.append((endereco, val, "horas_direto"))
+            
+            # Valor próximo de 17130 (minutos totais)
+            if 17000 <= val <= 17200:
+                notas.append(f"~17130 min = 285.5h")
+                candidatos_horimetro.append((endereco, val, "minutos_totais"))
+            
+            # Formato HHMM (28530 = 285h30m)
+            if 28000 <= val <= 29000:
+                notas.append(f"formato HHMM?")
+                candidatos_horimetro.append((endereco, val, "hhmm"))
+            
+            # BCD 0x0285 = 645 decimal
+            if val == 645:
+                notas.append(f"BCD 0x0285?")
+                candidatos_horimetro.append((endereco, val, "bcd_0285"))
+            
+            # BCD 0x2853 = 10323 decimal
+            if val == 10323:
+                notas.append(f"BCD 0x2853?")
+                candidatos_horimetro.append((endereco, val, "bcd_2853"))
+            
+            # Valor estável e não-zero (potencial candidato)
+            if val > 0 and val < 1000 and val != 625:  # 625 é partidas
+                notas.append(f"valor baixo estável?")
+            
+            if notas:
+                self.logger.info(f"  0x{endereco:04X}: {val:6d} → {', '.join(notas)}")
+        
+        # Relatório de partidas (confirmado em 0x0010 = 625)
+        self.logger.info("-" * 60)
+        if 0x0010 in todos_valores:
+            self.logger.info(f"PARTIDAS (confirmado): Reg 0x0010 = {todos_valores[0x0010]} ✓")
+        
+        # Candidatos ao horímetro
+        self.logger.info("-" * 60)
+        if candidatos_horimetro:
+            self.logger.info("CANDIDATOS A HORÍMETRO:")
+            for end, val, tipo in candidatos_horimetro:
+                self.logger.info(f"  0x{end:04X}: {val} ({tipo})")
         else:
-            self.logger.error("Falha ao ler bloco 1 (0x0000-0x000F)")
+            self.logger.warning("NENHUM CANDIDATO ÓBVIO ENCONTRADO PARA HORÍMETRO")
+            self.logger.info("Verifique manualmente os valores estáveis no scan acima.")
         
-        # Delay entre blocos
-        self.logger.info(f"Aguardando {DELAY_ENTRE_BLOCOS}s...")
-        time.sleep(DELAY_ENTRE_BLOCOS)
-        
-        # Lê segundo bloco: 0x0010 a 0x001F (16 registradores)
-        self.logger.info(">>> Lendo bloco 0x0010-0x001F (16 registradores)...")
-        valores_bloco2 = self.ler_bloco_registradores(0x0010, 16)
-        
-        if valores_bloco2:
-            self.logger.info("-" * 50)
-            self.logger.info("BLOCO 2 (0x0010-0x001F):")
-            for i, val in enumerate(valores_bloco2):
-                endereco = 0x0010 + i
-                self.logger.info(f"  Reg 0x{endereco:04X} (dec {endereco:5d}): {val:6d} (0x{val:04X})")
-            self.logger.info("-" * 50)
-        else:
-            self.logger.error("Falha ao ler bloco 2 (0x0010-0x001F)")
-        
-        # Análise especial
-        self.logger.info("=" * 70)
-        self.logger.info("=== ANÁLISE ESPECIAL ===")
-        
-        if valores_bloco1 and len(valores_bloco1) >= 14:
-            # Horímetro nos registradores 0x000D e 0x000E (índices 13 e 14)
-            reg_0d = valores_bloco1[13] if len(valores_bloco1) > 13 else 0
-            reg_0e = valores_bloco1[14] if len(valores_bloco1) > 14 else 0
-            
-            self.logger.info(f"Horímetro (0x000D + 0x000E):")
-            self.logger.info(f"  Reg 0x000D = {reg_0d} (0x{reg_0d:04X})")
-            self.logger.info(f"  Reg 0x000E = {reg_0e} (0x{reg_0e:04X})")
-            
-            # Testar interpretações
-            horimetro_32bit = (reg_0d << 16) | reg_0e
-            self.logger.info(f"  32-bit Big-Endian: {horimetro_32bit}")
-            self.logger.info(f"    Em segundos: {horimetro_32bit / 3600.0:.2f} horas")
-            self.logger.info(f"    Em minutos:  {horimetro_32bit / 60.0:.2f} horas")
-            
-            # Testar apenas reg 0x000D
-            self.logger.info(f"  Apenas 0x000D ({reg_0d}):")
-            self.logger.info(f"    Em segundos: {reg_0d / 3600.0:.2f} horas")
-            self.logger.info(f"    Em minutos:  {reg_0d / 60.0:.2f} horas")
-            self.logger.info(f"    Direto:      {reg_0d} (se já for horas*X)")
-            
-            # Testar formato especial: 0x3920 = 14624
-            # Se o valor está como HHMM (hora * 100 + minutos)?
-            hh = reg_0d // 100
-            mm = reg_0d % 100
-            self.logger.info(f"    Formato HHMM: {hh}h {mm}m")
-        
-        if valores_bloco1 and len(valores_bloco1) >= 16:
-            reg_0f = valores_bloco1[15] if len(valores_bloco1) > 15 else 0
-            self.logger.info(f"Reg 0x000F (antigo 'Partidas'): {reg_0f}")
-        
-        if valores_bloco2 and len(valores_bloco2) >= 1:
-            reg_10 = valores_bloco2[0]
-            self.logger.info(f"Reg 0x0010 (PARTIDAS real): {reg_10}")
+        # Verificar registrador 0x000D (que estava sendo usado como horímetro)
+        self.logger.info("-" * 60)
+        if 0x000D in todos_valores:
+            val_0d = todos_valores[0x000D]
+            self.logger.info(f"NOTA: Reg 0x000D = {val_0d} (0x{val_0d:04X})")
+            self.logger.info(f"  Este valor VARIA a cada leitura - NÃO é horímetro!")
+            self.logger.info(f"  Provavelmente é timestamp/contador interno do controlador.")
         
         self.logger.info("=" * 70)
-        self.logger.info("=== FIM DO SCAN ===")
+        self.logger.info("=== FIM DO SCAN EXTENDIDO v2.4.0 ===")
         self.logger.info("=" * 70)
     
     def ler_todos_registradores(self) -> Dict[str, Any]:
@@ -801,7 +847,7 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
 def main():
     """Inicia threads para cada gerador habilitado"""
     logger.info("=" * 60)
-    logger.info("VPS Modbus Reader - K30XL v2.3.0 (Mapeamento Corrigido)")
+    logger.info("VPS Modbus Reader - K30XL v2.4.0 (Scan Extendido)")
     logger.info("IMPORTANTE: Configure HF2211 com baudrate 19200!")
     logger.info(f"Edge Function: {EDGE_FUNCTION_URL}")
     
@@ -880,8 +926,8 @@ class HealthHandler(BaseHTTPRequestHandler):
             response = {
                 "status": "ok",
                 "service": "vps-modbus-reader",
-                "version": "2.3.0",
-                "protocol": "Modbus RTU (K30XL - Mapeamento Corrigido)",
+                "version": "2.4.0",
+                "protocol": "Modbus RTU (K30XL - Scan Extendido)",
                 "debug_mode": MODO_DEBUG,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }
@@ -967,8 +1013,9 @@ if __name__ == "__main__":
         MODO_SCAN = True
         MODO_DEBUG = True  # Scan sempre em debug
         logger.info("*" * 60)
-        logger.info("*** MODO SCAN ATIVADO VIA ARGUMENTO ***")
-        logger.info("*** VARREDURA DE REGISTRADORES 0x0000-0x001F ***")
+        logger.info("*** MODO SCAN EXTENDIDO v2.4.0 ***")
+        logger.info("*** VARREDURA DE 64 REGISTRADORES: 0x0000-0x003F ***")
+        logger.info("*** BUSCANDO HORÍMETRO REAL DE 285:30h ***")
         logger.info("*" * 60)
         main()
     elif "--debug" in sys.argv:
