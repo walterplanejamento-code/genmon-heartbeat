@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.4.0
+Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.4.1
 =====================================================
 
 Este script roda na VPS (82.25.70.90) em MODO ATIVO:
@@ -17,11 +17,11 @@ IMPORTANTE: Configuração do HF2211
 Arquitetura:
     [Gerador] → [K30XL] → [RS-232] → [HF2211] → [Internet] → [VPS:15002] → [Backend]
 
-CORREÇÃO v2.4.0: Scan extendido para descoberta do horímetro
-- Reg 0x000D está variando (não é horímetro!)
-- Scan de 64 registradores (0x0000-0x003F) em 4 blocos
-- Análise BCD para formato industrial
-- Partidas confirmado em Reg 0x0010 = 625
+CORREÇÃO v2.4.1: Aguarda conexão HF2211 antes do scan
+- v2.4.0: Scan extendido para descoberta do horímetro
+- v2.4.1: Corrige race condition - script tentava ler ANTES do HF conectar
+- Agora aguarda explicitamente a conexão TCP antes de iniciar scan
+- Adiciona log informativo "Sem conexão - aguardando HF2211..."
 
 Requisitos:
     pip install requests
@@ -406,7 +406,14 @@ class ConexaoHF:
         """
         Lê um bloco de registradores holding (função 0x03) usando Modbus RTU.
         Retorna lista de valores inteiros ou None em caso de erro.
+        
+        CORREÇÃO v2.4.1: Verifica conexão antes de tentar ler
         """
+        # CORREÇÃO v2.4.1: Verificar conexão antes de tentar ler
+        if not self.cliente_conectado or not self.socket_cliente:
+            self.logger.warning("Sem conexão - aguardando HF2211...")
+            return None
+        
         resposta = self.enviar_comando_modbus_rtu(0x03, endereco_inicial, quantidade)
         
         if not resposta:
@@ -847,7 +854,7 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
 def main():
     """Inicia threads para cada gerador habilitado"""
     logger.info("=" * 60)
-    logger.info("VPS Modbus Reader - K30XL v2.4.0 (Scan Extendido)")
+    logger.info("VPS Modbus Reader - K30XL v2.4.1 (Fix Conexão Scan)")
     logger.info("IMPORTANTE: Configure HF2211 com baudrate 19200!")
     logger.info(f"Edge Function: {EDGE_FUNCTION_URL}")
     
