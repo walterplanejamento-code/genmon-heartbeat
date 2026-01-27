@@ -3,33 +3,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { AlertBadge } from "@/components/ui/AlertBadge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Save, Plus, Trash2, Brain } from "lucide-react";
-import { useState } from "react";
-
-interface AlertRule {
-  id: string;
-  parameter: string;
-  minValue: string;
-  maxValue: string;
-  level: "info" | "warning" | "critical";
-  enabled: boolean;
-}
-
-const defaultRules: AlertRule[] = [
-  { id: "1", parameter: "Tensão GMG", minValue: "370", maxValue: "400", level: "warning", enabled: true },
-  { id: "2", parameter: "Temperatura Água", minValue: "0", maxValue: "95", level: "critical", enabled: true },
-  { id: "3", parameter: "Nível Combustível", minValue: "20", maxValue: "100", level: "warning", enabled: true },
-  { id: "4", parameter: "Tensão Bateria", minValue: "22", maxValue: "28", level: "critical", enabled: true },
-  { id: "5", parameter: "Frequência GMG", minValue: "59", maxValue: "61", level: "warning", enabled: true },
-];
-
-const activeAlerts = [
-  { level: "info" as const, message: "Sistema operando dentro dos parâmetros normais", timestamp: "10:45:23", source: "rule" as const },
-  { level: "warning" as const, message: "Nível de combustível em 75% - considerar reabastecimento", timestamp: "09:30:15", source: "ai" as const },
-];
+import { useGenerator } from "@/hooks/useGenerator";
+import { useAlertParams, AlertRule } from "@/hooks/useAlertParams";
+import { useRealtimeAlerts } from "@/hooks/useRealtimeReadings";
 
 export default function Alerts() {
-  const [rules, setRules] = useState<AlertRule[]>(defaultRules);
+  const { generator, isLoading: generatorLoading } = useGenerator();
+  const { rules, setRules, isLoading, isSaving, saveRules } = useAlertParams(generator?.id || null);
+  const { alerts } = useRealtimeAlerts(generator?.id || null);
 
   const addRule = () => {
     const newRule: AlertRule = {
@@ -55,9 +38,48 @@ export default function Alerts() {
     );
   };
 
-  const handleSave = () => {
-    console.log("Saving alert rules:", rules);
+  const handleSave = async () => {
+    await saveRules(rules);
   };
+
+  if (generatorLoading || isLoading) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-6">
+          <Skeleton className="h-10 w-64" />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Skeleton className="h-64 w-full" />
+            <Skeleton className="h-64 w-full" />
+          </div>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (!generator) {
+    return (
+      <DashboardLayout>
+        <div className="flex flex-col items-center justify-center h-[60vh] text-center">
+          <Brain className="w-16 h-16 text-muted-foreground mb-4" />
+          <h2 className="text-xl font-semibold text-foreground mb-2">
+            Nenhum Gerador Configurado
+          </h2>
+          <p className="text-muted-foreground max-w-md">
+            Configure primeiro um gerador na página de configurações para depois
+            configurar os alertas.
+          </p>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  // Convert realtime alerts to display format
+  const activeAlerts = alerts.map(alert => ({
+    level: alert.nivel as "info" | "warning" | "critical",
+    message: alert.mensagem,
+    timestamp: new Date(alert.created_at).toLocaleTimeString("pt-BR"),
+    source: alert.origem as "rule" | "ai",
+  }));
 
   return (
     <DashboardLayout>
@@ -192,9 +214,13 @@ export default function Alerts() {
 
         {/* Save button */}
         <div className="flex justify-end">
-          <Button onClick={handleSave} className="bg-primary text-primary-foreground hover:bg-primary/90">
+          <Button 
+            onClick={handleSave} 
+            disabled={isSaving}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
             <Save className="w-4 h-4 mr-2" />
-            Salvar Configurações
+            {isSaving ? "Salvando..." : "Salvar Configurações"}
           </Button>
         </div>
       </div>

@@ -3,10 +3,23 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StatusIndicator } from "@/components/ui/StatusIndicator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Save, Server, CheckCircle, XCircle, RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useGenerator } from "@/hooks/useGenerator";
+import { useVPSConnection } from "@/hooks/useVPSConnection";
 
 export default function VPS() {
+  const { generator, isLoading: generatorLoading } = useGenerator();
+  const {
+    connection,
+    isLoading,
+    isSaving,
+    updateConnection,
+    createConnection,
+    validateConnection,
+  } = useVPSConnection(generator?.id || null);
+
   const [config, setConfig] = useState({
     ipFixo: "45.33.100.50",
     porta: "502",
@@ -14,20 +27,77 @@ export default function VPS() {
     provider: "Linode",
   });
 
-  const [validationStatus, setValidationStatus] = useState<"validated" | "not_validated" | "validating">("validated");
-  const [lastValidation, setLastValidation] = useState("2024-01-15 14:30:00");
+  const [isValidating, setIsValidating] = useState(false);
 
-  const handleValidate = () => {
-    setValidationStatus("validating");
-    setTimeout(() => {
-      setValidationStatus("validated");
-      setLastValidation(new Date().toLocaleString("pt-BR"));
-    }, 2000);
+  // Sync form with database
+  useEffect(() => {
+    if (connection) {
+      setConfig({
+        ipFixo: connection.ip_fixo || "45.33.100.50",
+        porta: connection.porta || "502",
+        hostname: connection.hostname || "gen-monitor-vps",
+        provider: connection.provider || "Linode",
+      });
+    }
+  }, [connection]);
+
+  const handleValidate = async () => {
+    setIsValidating(true);
+    await validateConnection();
+    setIsValidating(false);
   };
 
-  const handleSave = () => {
-    console.log("Saving VPS config:", config);
+  const handleSave = async () => {
+    if (connection) {
+      await updateConnection({
+        ip_fixo: config.ipFixo,
+        porta: config.porta,
+        hostname: config.hostname,
+        provider: config.provider,
+      });
+    } else if (generator?.id) {
+      await createConnection(generator.id, {
+        ip_fixo: config.ipFixo,
+        porta: config.porta,
+        hostname: config.hostname,
+        provider: config.provider,
+      });
+    }
   };
+
+  const validationStatus = connection?.validado ? "validated" : "not_validated";
+  const lastValidation = connection?.ultima_validacao 
+    ? new Date(connection.ultima_validacao).toLocaleString("pt-BR")
+    : "Nunca validado";
+
+  if (generatorLoading || isLoading) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-6 max-w-4xl">
+          <Skeleton className="h-10 w-64" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-64 w-full" />
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (!generator) {
+    return (
+      <DashboardLayout>
+        <div className="flex flex-col items-center justify-center h-[60vh] text-center">
+          <Server className="w-16 h-16 text-muted-foreground mb-4" />
+          <h2 className="text-xl font-semibold text-foreground mb-2">
+            Nenhum Gerador Configurado
+          </h2>
+          <p className="text-muted-foreground max-w-md">
+            Configure primeiro um gerador na página de configurações para depois
+            configurar a VPS.
+          </p>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
@@ -41,8 +111,8 @@ export default function VPS() {
             </p>
           </div>
           <StatusIndicator 
-            status={validationStatus === "validated" ? "online" : validationStatus === "validating" ? "warning" : "offline"} 
-            label={validationStatus === "validated" ? "Validado" : validationStatus === "validating" ? "Validando..." : "Não Validado"} 
+            status={validationStatus === "validated" ? "online" : isValidating ? "warning" : "offline"} 
+            label={validationStatus === "validated" ? "Validado" : isValidating ? "Validando..." : "Não Validado"} 
           />
         </div>
 
@@ -167,12 +237,12 @@ export default function VPS() {
             </div>
             <Button
               onClick={handleValidate}
-              disabled={validationStatus === "validating"}
+              disabled={isValidating || isSaving}
               variant="outline"
               className="border-primary text-primary hover:bg-primary/10"
             >
-              <RefreshCw className={`w-4 h-4 mr-2 ${validationStatus === "validating" ? 'animate-spin' : ''}`} />
-              {validationStatus === "validating" ? 'Validando...' : 'Validar Novamente'}
+              <RefreshCw className={`w-4 h-4 mr-2 ${isValidating ? 'animate-spin' : ''}`} />
+              {isValidating ? 'Validando...' : 'Validar Novamente'}
             </Button>
           </div>
         </div>
@@ -185,15 +255,19 @@ export default function VPS() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="p-3 rounded-lg bg-secondary">
               <p className="text-xs text-muted-foreground mb-1">Latência</p>
-              <p className="font-mono text-data-cyan text-lg">23ms</p>
+              <p className="font-mono text-data-cyan text-lg">
+                {connection?.latencia_ms ? `${connection.latencia_ms}ms` : "--"}
+              </p>
             </div>
             <div className="p-3 rounded-lg bg-secondary">
               <p className="text-xs text-muted-foreground mb-1">Uptime</p>
-              <p className="font-mono text-data-green text-lg">99.9%</p>
+              <p className="font-mono text-data-green text-lg">
+                {connection?.uptime_percent ? `${connection.uptime_percent}%` : "--"}
+              </p>
             </div>
             <div className="p-3 rounded-lg bg-secondary">
               <p className="text-xs text-muted-foreground mb-1">Pacotes Recebidos</p>
-              <p className="font-mono text-foreground text-lg">1.2M</p>
+              <p className="font-mono text-foreground text-lg">--</p>
             </div>
             <div className="p-3 rounded-lg bg-secondary">
               <p className="text-xs text-muted-foreground mb-1">Erros</p>
@@ -204,9 +278,13 @@ export default function VPS() {
 
         {/* Save button */}
         <div className="flex justify-end">
-          <Button onClick={handleSave} className="bg-primary text-primary-foreground hover:bg-primary/90">
+          <Button 
+            onClick={handleSave} 
+            disabled={isSaving}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
             <Save className="w-4 h-4 mr-2" />
-            Salvar Configurações
+            {isSaving ? "Salvando..." : "Salvar Configurações"}
           </Button>
         </div>
       </div>
