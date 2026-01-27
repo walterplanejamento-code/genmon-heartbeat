@@ -12,6 +12,7 @@ import VPS from "./pages/VPS";
 import Alerts from "./pages/Alerts";
 import Manuals from "./pages/Manuals";
 import Settings from "./pages/Settings";
+import Diagnostics from "./pages/Diagnostics";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -33,6 +34,7 @@ const App = () => (
             <Route path="/alerts" element={<Alerts />} />
             <Route path="/manuals" element={<Manuals />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/diagnostics" element={<Diagnostics />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
