@@ -1,150 +1,157 @@
 
-# Plano de Ação: Estabilização das Leituras Modbus K30XL
+# Plano: Página de Diagnóstico Modbus + Correção do Script VPS
 
-## Problema Atual
+## Resumo do Problema
 
-O horímetro continua oscilando mesmo após as correções anteriores. Isso indica que ainda há **dessincronização de bytes** no socket TCP.
+Os dados estão chegando ao banco de dados com valores de horímetro completamente errados e oscilantes. O problema está no script da VPS que não está sincronizando corretamente a leitura dos bytes.
 
-## Causa Raiz Identificada
+---
 
-O socket TCP pode ter **bytes residuais** de leituras anteriores que "contaminam" a próxima leitura. Quando o CRC falha, descartamos, mas o próximo frame começa com os bytes residuais do anterior, causando leituras erradas com CRC que por acaso bate.
+## Parte 1: Criar Página de Diagnóstico no Sistema
 
-## Solução Definitiva: Modo Debug Completo (Sem Salvar no Banco)
+Criar uma nova página "Diagnóstico" que mostra:
+- Bytes RAW recebidos do Modbus (em hexadecimal)
+- Histórico das últimas 10 leituras com timestamp
+- Comparação visual entre valores estáveis e instáveis
+- Indicador de qualidade dos dados
 
-### Correção 1: Limpar Buffer Antes de Cada Leitura
+### Novo Arquivo: `src/pages/Diagnostics.tsx`
 
-Adicionar limpeza do socket antes de enviar cada comando Modbus para evitar bytes residuais.
+Uma página completa com:
+- Tabela mostrando últimas leituras do banco
+- Destaque visual quando valores mudam muito entre leituras
+- Botão para limpar dados antigos do banco (opcional)
+- Exibição do tempo entre leituras
 
-### Correção 2: Modo "Somente Log" (Não Envia para Backend)
+### Atualizar: `src/App.tsx`
 
-Adicionar flag `--debug` que:
-- Lê dados reais do controlador
-- Mostra TODOS os bytes brutos no log
-- **NÃO envia para o banco de dados**
+Adicionar rota `/diagnostics` para a nova página.
 
-### Correção 3: Validação de Valores Físicos
+### Atualizar: `src/components/layout/Sidebar.tsx`
 
-Adicionar verificação de faixa para detectar valores impossíveis:
-- Horímetro: 0 a 999.999 horas (valor máximo físico razoável)
-- Se o valor estiver fora da faixa, descarta a leitura
+Adicionar link "Diagnóstico" no menu lateral.
 
-### Correção 4: Log Hexadecimal Completo da Resposta
+---
 
-Mostrar a resposta raw COMPLETA antes de processar para verificar visualmente se os dados estão corretos.
+## Parte 2: Correção Definitiva do Script VPS
 
-## Arquivo a Modificar
+O problema real identificado nos logs:
 
-`docs/vps-modbus-reader.py`
-
-## Alterações Específicas
-
-### 1. Nova Variável Global (após linha 52)
-
-```python
-# Modo debug: não envia para backend, só mostra logs
-MODO_DEBUG = False
+```
+Bloco 2 RAW: ['0x0306', ...] → Horímetro: 14090 h
+Bloco 2 RAW: ['0x0E06', ...] → Horímetro: 65353 h
 ```
 
-### 2. Função de Limpeza de Buffer (antes da linha 225)
+O primeiro byte (0x03 vs 0x0E) está mudando! Isso indica que o frame Modbus está começando em posições diferentes do buffer.
+
+### Solução: Sincronização por Marcador de Início
+
+Em vez de confiar que o primeiro byte recebido é sempre o endereço do dispositivo, vamos:
+1. Descartar bytes até encontrar o padrão esperado: `01 03 XX`
+2. Ler o byte count para saber quantos bytes esperar
+3. Validar CRC antes de processar
+
+### Correções no Script (`docs/vps-modbus-reader.py`):
+
+1. **Nova função `sincronizar_resposta()`**
+   - Busca o padrão `01 03` no buffer
+   - Descarta bytes anteriores (lixo)
+   - Lê a quantidade correta de bytes baseada no byte count
+
+2. **Aumentar delay entre blocos**
+   - Adicionar 500ms entre leitura do Bloco 1 e Bloco 2
+   - Dar tempo para o buffer limpar completamente
+
+3. **Log de bytes descartados**
+   - Mostrar quantos bytes de lixo foram descartados
+   - Isso ajuda a identificar se há problema no HF2211
+
+---
+
+## Arquivos a Modificar
+
+| Arquivo | Ação |
+|---------|------|
+| `src/pages/Diagnostics.tsx` | **CRIAR** - Página de diagnóstico |
+| `src/App.tsx` | Adicionar rota `/diagnostics` |
+| `src/components/layout/Sidebar.tsx` | Adicionar link no menu |
+| `docs/vps-modbus-reader.py` | Sincronização por marcador + delay entre blocos |
+
+---
+
+## Código da Página de Diagnóstico
+
+A página vai:
+1. Buscar as últimas 20 leituras do banco
+2. Mostrar em tabela com destaque para valores que mudam muito
+3. Calcular a variação percentual entre leituras consecutivas
+4. Mostrar status de conexão em tempo real
+
+---
+
+## Código Atualizado do Script VPS
+
+A correção principal será:
 
 ```python
-def limpar_buffer_socket(self):
-    """Limpa bytes residuais do socket antes de nova leitura"""
-    if not self.socket_cliente:
-        return
-    try:
-        self.socket_cliente.setblocking(False)
-        while True:
-            try:
-                lixo = self.socket_cliente.recv(256)
-                if lixo:
-                    self.logger.warning(f"Bytes residuais descartados: {lixo.hex(' ').upper()}")
-                else:
-                    break
-            except BlockingIOError:
-                break
-        self.socket_cliente.setblocking(True)
-        self.socket_cliente.settimeout(0.5)
-    except Exception as e:
-        self.logger.debug(f"Erro ao limpar buffer: {e}")
-```
-
-### 3. Chamar Limpeza Antes de Cada Comando (linha 258, antes de send)
-
-```python
-# Limpa buffer antes de enviar
-self.limpar_buffer_socket()
-```
-
-### 4. Validação de Horímetro (linhas 425-440)
-
-```python
-# Validar faixa física do horímetro
-MAX_HORIMETRO_HORAS = 500000  # Limite razoável: ~57 anos
-
-horimetro_big = (valores_bloco2[0] << 16) | valores_bloco2[1]
-horimetro_little = (valores_bloco2[1] << 16) | valores_bloco2[0]
-
-horas_big = horimetro_big / 3600.0
-horas_little = horimetro_little / 3600.0
-
-self.logger.info(f"  [DEBUG] Horímetro Big-Endian: {horas_big:.2f} h")
-self.logger.info(f"  [DEBUG] Horímetro Little-Endian: {horas_little:.2f} h")
-
-# Escolher a interpretação que faz sentido físico
-if 0 < horas_big < MAX_HORIMETRO_HORAS:
-    horas_trabalhadas = round(horas_big, 2)
-elif 0 < horas_little < MAX_HORIMETRO_HORAS:
-    horas_trabalhadas = round(horas_little, 2)
-    self.logger.warning("Usando Little-Endian para horímetro!")
-else:
-    self.logger.error(f"Horímetro INVÁLIDO! Big={horas_big:.2f}h, Little={horas_little:.2f}h")
-    horas_trabalhadas = None  # Não salva valor inválido
-
-if horas_trabalhadas is not None:
-    dados["horas_trabalhadas"] = horas_trabalhadas
-```
-
-### 5. Não Enviar em Modo Debug (linha 562)
-
-```python
-if dados:
-    log.info(f"Dados lidos: {len(dados)} parâmetros")
-    if not MODO_DEBUG:
-        enviar_para_backend(porta_vps, dados)
-    else:
-        log.info("MODO DEBUG: Dados NÃO enviados para backend")
-```
-
-### 6. Ativar Modo Debug pelo Argumento (linhas 734-740)
-
-```python
-if __name__ == "__main__":
-    import sys
+def sincronizar_resposta(self, tamanho_esperado: int) -> bytes:
+    """
+    Sincroniza a leitura buscando o padrão de início Modbus.
+    Descarta bytes de lixo até encontrar: [ADDR=01][FC=03][BYTECOUNT]
+    """
+    buffer = bytearray()
+    lixo_descartado = 0
     
-    if "--teste" in sys.argv:
-        testar_envio_simulado()
-    elif "--debug" in sys.argv:
-        MODO_DEBUG = True
-        logger.info("*** MODO DEBUG ATIVADO - Dados NÃO serão salvos ***")
-        main()
-    else:
-        main()
+    while True:
+        byte = self.socket_cliente.recv(1)
+        if not byte:
+            break
+            
+        buffer.append(byte[0])
+        
+        # Procura padrão de início: 01 03
+        if len(buffer) >= 2:
+            # Encontrou início válido
+            if buffer[-2] == 0x01 and buffer[-1] == 0x03:
+                # Descarta lixo anterior
+                if len(buffer) > 2:
+                    lixo_descartado = len(buffer) - 2
+                    self.logger.warning(f"Bytes de lixo descartados: {lixo_descartado}")
+                    buffer = buffer[-2:]
+                
+                # Lê o resto do frame
+                byte_count = self.socket_cliente.recv(1)[0]
+                buffer.append(byte_count)
+                
+                # Lê dados + CRC
+                restante = byte_count + 2  # dados + 2 bytes CRC
+                dados = self.socket_cliente.recv(restante)
+                buffer.extend(dados)
+                
+                return bytes(buffer)
+        
+        # Limite de segurança
+        if len(buffer) > 100:
+            self.logger.error("Muitos bytes sem encontrar padrão válido")
+            return bytes()
+    
+    return bytes(buffer)
 ```
 
-## Instruções de Implantação
-
-1. Copiar o código completo atualizado para a VPS
-2. Parar o serviço: `systemctl stop gmg-lovable`
-3. Atualizar: `nano /root/gmg-lovable/vps-modbus-reader.py`
-4. Testar em modo debug: `python3 /root/gmg-lovable/vps-modbus-reader.py --debug`
-5. Monitorar os logs no terminal
-6. Se os dados estabilizarem, rodar sem `--debug` para enviar ao backend
+---
 
 ## Resultado Esperado
 
-Com essas correções:
-1. **Buffer limpo** antes de cada leitura = sem contaminação de bytes
-2. **Valores impossíveis rejeitados** = só dados válidos
-3. **Modo debug** = testar sem poluir o banco
-4. **Logs completos** = ver exatamente o que chega do controlador
+1. **Página de Diagnóstico**: Você verá em tempo real se os dados estão estáveis ou oscilando
+2. **Script VPS**: A sincronização por marcador vai garantir que sempre lemos do início correto do frame
+3. **Dados Confiáveis**: O horímetro vai estabilizar no valor real do gerador
+
+---
+
+## Passos de Implantação
+
+1. Aprovar este plano para eu criar a página de diagnóstico
+2. Copiar o script atualizado para a VPS
+3. Parar serviço: `systemctl stop gmg-lovable`
+4. Executar em modo debug: `python3 vps-modbus-reader.py --debug`
+5. Acompanhar na página de diagnóstico se os dados estabilizam
