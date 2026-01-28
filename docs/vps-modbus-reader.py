@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.4.1
+Script VPS - Leitor Modbus K30XL (Modo Ativo) v2.5.0
 =====================================================
 
 Este script roda na VPS (82.25.70.90) em MODO ATIVO:
@@ -17,11 +17,17 @@ IMPORTANTE: Configuração do HF2211
 Arquitetura:
     [Gerador] → [K30XL] → [RS-232] → [HF2211] → [Internet] → [VPS:15002] → [Backend]
 
-CORREÇÃO v2.4.1: Aguarda conexão HF2211 antes do scan
-- v2.4.0: Scan extendido para descoberta do horímetro
-- v2.4.1: Corrige race condition - script tentava ler ANTES do HF conectar
-- Agora aguarda explicitamente a conexão TCP antes de iniciar scan
-- Adiciona log informativo "Sem conexão - aguardando HF2211..."
+CORREÇÃO v2.5.0: Horímetro correto em 0x000B
+- Confirmado via scan: Reg 0x000B = horas do horímetro (284 = ~285h)
+- Reg 0x0010 = Partidas (626) ✓
+- Reg 0x000D oscila - NÃO é horímetro, é contador interno
+- Novo payload: horimetro_horas, horimetro_minutos (0), horimetro_segundos (0)
+
+HISTÓRICO:
+- v2.4.1: Corrige race condition no scan
+- v2.4.0: Scan extendido para descoberta
+- v2.3.0: Mapeamento partidas corrigido
+- v2.2.0: Sincronização de frames
 
 Requisitos:
     pip install requests
@@ -107,27 +113,29 @@ DELAY_ENTRE_BLOCOS = 0.5  # 500ms
 MAX_HORIMETRO_HORAS = 500000  # ~57 anos
 
 # =============================================================================
-# MAPEAMENTO DE REGISTRADORES K30XL - CORRIGIDO v2.3.0
+# MAPEAMENTO DE REGISTRADORES K30XL - CORRIGIDO v2.5.0
 # =============================================================================
 # 
-# MAPEAMENTO CORRIGIDO baseado em medições físicas do display:
-# Display físico: Partidas = 625, Horímetro = 285:30h
+# MAPEAMENTO CONFIRMADO VIA SCAN v2.4.0:
+# Display físico: Partidas = 626, Horímetro = 285:30:15
 # 
-# End.Protocolo  Parâmetro                 Medição Real
+# End.Protocolo  Parâmetro                 Valor Scan       Status
 # -------------------------------------------------------------------------
-# 0x0000         Tensão Rede R-S           Bloco 1 OK
-# 0x0001         Tensão Rede S-T           Bloco 1 OK
-# 0x0002         Tensão Rede T-R           Bloco 1 OK
-# 0x0003         Tensão GMG U-V            Bloco 1 OK
-# 0x0004         Corrente Fase 1           Bloco 1 OK
-# 0x0005         Frequência GMG            Bloco 1 OK (0.1 Hz)
-# 0x0006         RPM Motor                 Bloco 1 OK
-# 0x0007         Tensão Bateria            Bloco 1 OK (0.1 V)
-# 0x0008         Temperatura Água          Bloco 1 OK
-# 0x000D-0x000E  Horas Trabalhadas         MINUTOS? (14624 -> 243.7h)
-# 0x000F         ???                       0 (não é partidas!)
-# 0x0010         PARTIDAS                  625 ✓ CONFIRMADO!
-# 0x0013         Nível Combustível         0%
+# 0x0000         Tensão Rede R-S           0                OK
+# 0x0001         Tensão Rede S-T           218              OK
+# 0x0002         Tensão Rede T-R           215              OK
+# 0x0003         Tensão GMG U-V            218              OK
+# 0x0004         Corrente Fase 1           0                OK
+# 0x0005         Frequência GMG            19 (1.9Hz)       OK (0.1 Hz)
+# 0x0006         RPM Motor                 0                OK
+# 0x0007         Tensão Bateria            0                OK (0.1 V)
+# 0x0008         Temperatura Água          130              OK
+# 0x000A         ???                       180              DESCONHECIDO
+# 0x000B         HORÍMETRO HORAS           284 ✓            CONFIRMADO!
+# 0x000C         ???                       3866             DESCONHECIDO
+# 0x000D         Contador Interno          VARIA            NÃO É HORÍMETRO!
+# 0x0010         PARTIDAS                  626 ✓            CONFIRMADO!
+# 0x0013         Nível Combustível         0%               OK
 #
 # =============================================================================
 
@@ -141,9 +149,10 @@ class RegistradorModbus:
     tipo: str = "holding"
 
 
-# Bloco 1: Registradores 0x0000 a 0x0008 (9 registradores)
+# Bloco 1: Registradores 0x0000 a 0x000B (12 registradores)
+# CORREÇÃO v2.5.0: Expandido para incluir horímetro em 0x000B
 BLOCO1_ENDERECO = 0x0000
-BLOCO1_QUANTIDADE = 9
+BLOCO1_QUANTIDADE = 12  # Aumentado de 9 para 12
 BLOCO1_REGISTRADORES = [
     RegistradorModbus(0x0000, "tensao_rede_rs", 1.0, "V"),
     RegistradorModbus(0x0001, "tensao_rede_st", 1.0, "V"),
@@ -154,16 +163,17 @@ BLOCO1_REGISTRADORES = [
     RegistradorModbus(0x0006, "rpm_motor", 1.0, "RPM"),
     RegistradorModbus(0x0007, "tensao_bateria", 0.1, "V"),  # 0.1 V por bit
     RegistradorModbus(0x0008, "temperatura_agua", 1.0, "°C"),
+    RegistradorModbus(0x0009, "reservado_09", 1.0, ""),     # Reservado
+    RegistradorModbus(0x000A, "reservado_0a", 1.0, ""),     # Reservado
+    RegistradorModbus(0x000B, "horimetro_horas", 1.0, "h"), # ✓ HORÍMETRO CONFIRMADO!
 ]
 
-# Bloco 2: Registradores 0x000D a 0x0013 (7 registradores)
-# CORREÇÃO v2.3.0: Mapeamento corrigido
-BLOCO2_ENDERECO = 0x000D
-BLOCO2_QUANTIDADE = 7
-# Estrutura CORRIGIDA:
-#   [0x000D, 0x000E] = Horímetro 32-bit (MINUTOS, não segundos!)
-#   [0x000F] = ??? (sempre 0)
-#   [0x0010] = PARTIDAS (não Status!) → 625 confirmado
+# Bloco 2: Registradores 0x0010 a 0x0013 (4 registradores)
+# CORREÇÃO v2.5.0: Começa direto em Partidas (0x0010)
+BLOCO2_ENDERECO = 0x0010
+BLOCO2_QUANTIDADE = 4
+# Estrutura v2.5.0:
+#   [0x0010] = PARTIDAS → 626 confirmado ✓
 #   [0x0011] = Reservado ou Status?
 #   [0x0012] = Reservado
 #   [0x0013] = Nível Combustível
@@ -613,15 +623,15 @@ class ConexaoHF:
         """
         Lê todos os registradores K30XL em duas requisições (blocos).
         
-        CORREÇÃO v2.3.0: Mapeamento corrigido - Partidas em 0x0010
+        CORREÇÃO v2.5.0: Horímetro confirmado em 0x000B
         """
         dados = {}
         
         # =========================================
-        # BLOCO 1: Parâmetros Elétricos e Motor
+        # BLOCO 1: Parâmetros Elétricos, Motor e HORÍMETRO
         # =========================================
         self.logger.info("=" * 50)
-        self.logger.info("=== Lendo Bloco 1 (0x0000-0x0008) ===")
+        self.logger.info("=== Lendo Bloco 1 (0x0000-0x000B) - v2.5.0 ===")
         valores_bloco1 = self.ler_bloco_registradores(BLOCO1_ENDERECO, BLOCO1_QUANTIDADE)
         
         if not valores_bloco1:
@@ -630,21 +640,37 @@ class ConexaoHF:
         
         self.logger.info(f"Bloco 1 RAW: {[f'0x{v:04X}' for v in valores_bloco1]}")
         
-        # Mapear valores do Bloco 1
-        for i, reg in enumerate(BLOCO1_REGISTRADORES):
+        # Mapear valores do Bloco 1 (0x0000 a 0x0008)
+        for i, reg in enumerate(BLOCO1_REGISTRADORES[:9]):  # Só os primeiros 9
             if i < len(valores_bloco1):
                 valor_raw = valores_bloco1[i]
                 valor = valor_raw * reg.fator_escala
                 dados[reg.nome] = round(valor, 2) if reg.fator_escala != 1.0 else valor
+        
+        # =========================================
+        # HORÍMETRO - Registrador 0x000B (índice 11)
+        # CORREÇÃO v2.5.0: Confirmado via scan!
+        # =========================================
+        if len(valores_bloco1) >= 12:
+            horimetro_horas = valores_bloco1[11]  # Índice 11 = 0x000B
+            self.logger.info(f"  ★ Reg 0x000B (HORÍMETRO): {horimetro_horas} horas ✓")
+            
+            # Novos campos separados para o backend
+            dados["horimetro_horas"] = horimetro_horas
+            dados["horimetro_minutos"] = 0  # Por enquanto, não identificado
+            dados["horimetro_segundos"] = 0  # Por enquanto, não identificado
+            
+            # Manter compatibilidade com campo antigo
+            dados["horas_trabalhadas"] = float(horimetro_horas)
         
         # CORREÇÃO v2.2.0: Delay maior entre blocos para buffer limpar
         self.logger.info(f"Aguardando {DELAY_ENTRE_BLOCOS}s para buffer limpar...")
         time.sleep(DELAY_ENTRE_BLOCOS)
         
         # =========================================
-        # BLOCO 2: Horímetro, Partidas, Status, Combustível
+        # BLOCO 2: Partidas e Combustível
         # =========================================
-        self.logger.info("=== Lendo Bloco 2 (0x000D-0x0013) ===")
+        self.logger.info("=== Lendo Bloco 2 (0x0010-0x0013) - v2.5.0 ===")
         valores_bloco2 = self.ler_bloco_registradores(BLOCO2_ENDERECO, BLOCO2_QUANTIDADE)
         
         if not valores_bloco2:
@@ -653,73 +679,23 @@ class ConexaoHF:
         
         self.logger.info(f"Bloco 2 RAW: {[f'0x{v:04X}' for v in valores_bloco2]}")
         
-        # Processar Bloco 2
-        # Índice 0-1: Horímetro 32-bit (0x000D-0x000E)
-        # CORREÇÃO v2.3.0: Testar em MINUTOS em vez de segundos
+        # CORREÇÃO v2.5.0: Índice 0 = PARTIDAS (0x0010)
+        if len(valores_bloco2) >= 1:
+            dados["numero_partidas"] = valores_bloco2[0]
+            self.logger.info(f"  ★ Reg 0x0010 (PARTIDAS): {valores_bloco2[0]} ✓")
+        
+        # Índice 1-2: Reservados (0x0011, 0x0012)
         if len(valores_bloco2) >= 2:
-            self.logger.info(f"  Reg 0x000D: {valores_bloco2[0]} (0x{valores_bloco2[0]:04X})")
-            self.logger.info(f"  Reg 0x000E: {valores_bloco2[1]} (0x{valores_bloco2[1]:04X})")
-            
-            # Testar interpretações
-            horimetro_32bit = (valores_bloco2[0] << 16) | valores_bloco2[1]
-            
-            # Opção 1: Em segundos (antigo)
-            horas_segundos = horimetro_32bit / 3600.0
-            
-            # Opção 2: Em MINUTOS (NOVA HIPÓTESE v2.3.0)
-            horas_minutos = horimetro_32bit / 60.0
-            
-            # Opção 3: Apenas reg 0x000D em minutos
-            horas_reg0d_minutos = valores_bloco2[0] / 60.0
-            
-            self.logger.info(f"  Interpretações:")
-            self.logger.info(f"    32-bit em segundos: {horas_segundos:.2f} h")
-            self.logger.info(f"    32-bit em minutos:  {horas_minutos:.2f} h")
-            self.logger.info(f"    0x000D em minutos:  {horas_reg0d_minutos:.2f} h (← esperado ~285h)")
-            
-            # Escolher a interpretação mais próxima de 285h
-            # Se reg 0x000D = 14624 e esperamos 285h, então: 14624 / 285 = 51.3
-            # Pode ser décimos de hora? 14624 / 10 = 1462.4 ❌
-            # Pode ser formato especial? 
-            
-            horas_trabalhadas = None
-            
-            # Testar: 0x000D pode conter minutos totais (14624 min = 243.7h)
-            if 0 < horas_reg0d_minutos < MAX_HORIMETRO_HORAS:
-                horas_trabalhadas = round(horas_reg0d_minutos, 2)
-                self.logger.info(f"  >>> USANDO Reg 0x000D em minutos: {horas_trabalhadas} h")
-            elif 0 < horas_segundos < MAX_HORIMETRO_HORAS:
-                horas_trabalhadas = round(horas_segundos, 2)
-                self.logger.info(f"  >>> USANDO 32-bit em segundos: {horas_trabalhadas} h")
-            else:
-                self.logger.error(f"  >>> INVÁLIDO! Valores fora da faixa válida")
-            
-            if horas_trabalhadas is not None:
-                dados["horas_trabalhadas"] = horas_trabalhadas
-        
-        # Índice 2: Reg 0x000F (desconhecido - sempre 0)
+            self.logger.info(f"  Reg 0x0011: {valores_bloco2[1]} (0x{valores_bloco2[1]:04X})")
         if len(valores_bloco2) >= 3:
-            self.logger.info(f"  Reg 0x000F (???): {valores_bloco2[2]}")
+            self.logger.info(f"  Reg 0x0012: {valores_bloco2[2]} (0x{valores_bloco2[2]:04X})")
         
-        # CORREÇÃO v2.3.0: Índice 3 = PARTIDAS (0x0010)
-        # Antes era interpretado como Status Bits, mas 0x0271 = 625 = Partidas!
+        # Índice 3: Nível Combustível (0x0013)
         if len(valores_bloco2) >= 4:
-            dados["numero_partidas"] = valores_bloco2[3]
-            self.logger.info(f"  Reg 0x0010 (PARTIDAS): {valores_bloco2[3]} ✓")
+            dados["nivel_combustivel"] = valores_bloco2[3]
+            self.logger.info(f"  Reg 0x0013 (Combustível): {valores_bloco2[3]}%")
         
-        # Índice 4-5: Possivelmente status ou reservado
-        if len(valores_bloco2) >= 5:
-            self.logger.info(f"  Reg 0x0011: {valores_bloco2[4]} (0x{valores_bloco2[4]:04X})")
-        if len(valores_bloco2) >= 6:
-            self.logger.info(f"  Reg 0x0012: {valores_bloco2[5]} (0x{valores_bloco2[5]:04X})")
-        
-        # Índice 6: Nível Combustível (0x0013)
-        if len(valores_bloco2) >= 7:
-            dados["nivel_combustivel"] = valores_bloco2[6]
-            self.logger.info(f"  Reg 0x0013 (Combustível): {valores_bloco2[6]}%")
-        
-        # Status bits: Não sabemos onde estão após correção
-        # Por enquanto, definir valores padrão baseados na rede
+        # Status bits: Inferidos a partir dos valores lidos
         tensao_rede = dados.get("tensao_rede_rs", 0)
         dados["rede_ok"] = tensao_rede > 180
         dados["motor_funcionando"] = dados.get("rpm_motor", 0) > 100
@@ -731,9 +707,9 @@ class ConexaoHF:
         # LOG RESUMIDO
         # =========================================
         self.logger.info("=" * 50)
-        self.logger.info("RESUMO LEITURA v2.3.0:")
-        self.logger.info(f"  Horímetro: {dados.get('horas_trabalhadas', 'N/A')} h")
-        self.logger.info(f"  Partidas: {dados.get('numero_partidas', 'N/A')}")
+        self.logger.info("RESUMO LEITURA v2.5.0:")
+        self.logger.info(f"  ★ Horímetro: {dados.get('horimetro_horas', 'N/A')}h (formato: {dados.get('horimetro_horas', 0):05d}:00:00)")
+        self.logger.info(f"  ★ Partidas: {dados.get('numero_partidas', 'N/A')}")
         self.logger.info(f"  Tensão Rede: {dados.get('tensao_rede_rs', 'N/A')} V")
         self.logger.info(f"  Motor: {dados.get('motor_funcionando', 'N/A')}")
         self.logger.info("=" * 50)
@@ -854,7 +830,7 @@ def worker_gerador(porta_vps: str, config: Dict[str, Any]):
 def main():
     """Inicia threads para cada gerador habilitado"""
     logger.info("=" * 60)
-    logger.info("VPS Modbus Reader - K30XL v2.4.1 (Fix Conexão Scan)")
+    logger.info("VPS Modbus Reader - K30XL v2.5.0 (Horímetro Corrigido)")
     logger.info("IMPORTANTE: Configure HF2211 com baudrate 19200!")
     logger.info(f"Edge Function: {EDGE_FUNCTION_URL}")
     
