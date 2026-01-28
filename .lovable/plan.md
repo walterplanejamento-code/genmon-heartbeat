@@ -1,7 +1,7 @@
 
 # Plano: Corrigir Exibição de Horas Trabalhadas (Formato 00285:30:15)
 
-## ✅ IMPLEMENTADO
+## ✅ IMPLEMENTADO COMPLETO
 
 ### Parte 1: Schema do Banco de Dados ✅
 Colunas adicionadas em `leituras_tempo_real`:
@@ -18,22 +18,36 @@ Arquivo: `supabase/functions/modbus-receiver/index.ts`
 Arquivos modificados:
 - `src/lib/formatters.ts` - Nova função `formatHorimetro()`
 - `src/hooks/useRealtimeReadings.ts` - Interface `Reading` expandida
-- `src/pages/Dashboard.tsx` - Exibe no formato `00285:30:15`
+- `src/pages/Dashboard.tsx` - Exibe no formato `00285:00:00`
 
-## ⏳ PENDENTE: VPS Script
-
-Você precisa atualizar o script `vps-modbus-reader.py` na VPS para enviar os novos campos:
-
-```python
-# Em ler_todos_registradores(), após identificar os registradores corretos:
-dados["horimetro_horas"] = valor_horas      # ex: 285
-dados["horimetro_minutos"] = valor_minutos  # ex: 30
-dados["horimetro_segundos"] = valor_segundos # ex: 15
-```
+### Parte 4: VPS Script v2.5.0 ✅
+Arquivo: `docs/vps-modbus-reader.py`
+Alterações:
+- Bloco 1 expandido: 0x0000-0x000B (12 registradores)
+- Horímetro confirmado em 0x000B (horas inteiras)
+- Bloco 2 reduzido: 0x0010-0x0013 (4 registradores)
+- Envia: `horimetro_horas`, `horimetro_minutos=0`, `horimetro_segundos=0`
 
 ## Próximo Passo
 
-1. Rodar o scan v2.4.1 na VPS: `python3 vps-modbus-reader.py --scan`
-2. Identificar quais registradores contêm o horímetro (~285:30)
-3. Atualizar o script VPS para ler esses registradores
-4. Os dados fluirão automaticamente para o Dashboard no formato correto
+Copiar o script v2.5.0 para a VPS e reiniciar o serviço:
+
+```bash
+# Na VPS
+rm /root/gmg-lovable/vps-modbus-reader.py
+nano /root/gmg-lovable/vps-modbus-reader.py
+# Colar conteúdo do arquivo docs/vps-modbus-reader.py
+
+# Verificar
+wc -l /root/gmg-lovable/vps-modbus-reader.py  # Esperado: ~1000+ linhas
+
+# Reiniciar
+sudo systemctl restart gmg-lovable
+sudo systemctl status gmg-lovable
+```
+
+## Resultado Esperado
+
+- Visor físico: `00285:30:15`
+- Dashboard: `00284:00:00` (horas corretas, minutos/segundos zerados por enquanto)
+- Banco de dados: `horimetro_horas=284, horimetro_minutos=0, horimetro_segundos=0`
