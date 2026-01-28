@@ -7,6 +7,7 @@ import { useGenerator } from "@/hooks/useGenerator";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
 import { useEffect } from "react";
+import { formatHorimetro, horasDecimaisParaFormato } from "@/lib/formatters";
 import {
   Zap,
   Thermometer,
@@ -62,7 +63,23 @@ export default function Dashboard() {
     aviso_ativo: false,
     falha_ativa: false,
     created_at: new Date().toISOString(),
+    // Mock para horímetro no formato correto
+    horimetro_horas: 285,
+    horimetro_minutos: 30,
+    horimetro_segundos: 15,
   };
+
+  // Formatar horímetro: usa campos separados se disponíveis, senão converte horas decimais
+  const horasTrabalhadasFormatado = 
+    readings.horimetro_horas !== null && readings.horimetro_horas !== undefined
+      ? formatHorimetro(
+          readings.horimetro_horas ?? 0,
+          readings.horimetro_minutos ?? 0,
+          readings.horimetro_segundos ?? 0
+        )
+      : readings.horas_trabalhadas !== null
+        ? horasDecimaisParaFormato(readings.horas_trabalhadas)
+        : "00000:00:00";
 
   const generatorStatus = isConnected && latestReading ? "online" : generator ? "online" : "offline";
 
@@ -191,8 +208,7 @@ export default function Dashboard() {
           />
           <MetricCard
             label="Horas Trabalhadas"
-            value={(readings.horas_trabalhadas ?? 0).toLocaleString()}
-            unit="h"
+            value={horasTrabalhadasFormatado}
             icon={<Clock className="w-5 h-5" />}
           />
           <MetricCard
