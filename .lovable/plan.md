@@ -1,116 +1,119 @@
 
-# Plano: Corrigir Fluxo de Conexão no Script v2.4.0
+# Plano: Corrigir Exibição de Horas Trabalhadas (Formato 00285:30:15)
 
-## Problema Identificado
+## Problema Atual
 
-O script v2.4.0 está tentando ler registradores **ANTES** do HF2211 conectar. Compare os logs:
+O visor físico do gerador mostra `00285:30:15` (285 horas, 30 minutos, 15 segundos), mas o sistema:
 
-| Versão | Comportamento |
-|--------|---------------|
-| v2.2.0 | `Servidor iniciado` → `HF2211 conectado de (200.129.129.2)` → `Lendo Bloco 1` |
-| v2.4.0 | `Servidor iniciado` → `Lendo Bloco 1` → `Falha na leitura` ← HF nunca conectou! |
+1. Lê o registrador errado (0x000D oscila aleatoriamente)
+2. Armazena apenas um número decimal (ex: 167.08)
+3. Exibe apenas "1,250 h" no Dashboard
 
-A raiz do problema: O método `scan_registradores` loga "Lendo Bloco 1" (linha 498) mesmo quando `socket_cliente` é `None`, porque não verifica a conexão antes de tentar.
+## Solução em 4 Partes
 
----
+### Parte 1: Expandir Schema do Banco de Dados
 
-## Solução
+Adicionar campos para armazenar horas, minutos e segundos separadamente:
 
-### 1. Adicionar Verificação de Conexão em `ler_bloco_registradores`
+```sql
+ALTER TABLE leituras_tempo_real
+ADD COLUMN horimetro_horas integer DEFAULT 0,
+ADD COLUMN horimetro_minutos integer DEFAULT 0,
+ADD COLUMN horimetro_segundos integer DEFAULT 0;
 
-O método precisa retornar `None` imediatamente se não houver conexão ativa, com log informativo:
-
-```python
-def ler_bloco_registradores(self, endereco_inicial: int, quantidade: int) -> Optional[list]:
-    """Lê um bloco de registradores holding (função 0x03)"""
-    # CORREÇÃO: Verificar conexão antes de tentar ler
-    if not self.cliente_conectado or not self.socket_cliente:
-        self.logger.warning("Sem conexão - aguardando HF2211...")
-        return None
-    
-    resposta = self.enviar_comando_modbus_rtu(0x03, endereco_inicial, quantidade)
-    # ... resto do código
+COMMENT ON COLUMN leituras_tempo_real.horimetro_horas IS 'Horas do horímetro (ex: 285)';
+COMMENT ON COLUMN leituras_tempo_real.horimetro_minutos IS 'Minutos do horímetro (ex: 30)';
+COMMENT ON COLUMN leituras_tempo_real.horimetro_segundos IS 'Segundos do horímetro (ex: 15)';
 ```
 
-### 2. Aguardar Conexão Explicitamente no Modo SCAN
+### Parte 2: Atualizar VPS Script
 
-Modificar o worker para garantir que a conexão seja estabelecida antes de chamar `scan_registradores`:
+Depois que o scan identificar os registradores corretos, modificar `ler_todos_registradores()` para:
 
 ```python
-# No worker_gerador (linha 809):
-if MODO_SCAN:
-    # Aguardar conexão antes do scan
-    while not conexao.cliente_conectado:
-        log.info("Aguardando HF2211 conectar para iniciar scan...")
-        if conexao.aceitar_conexao():
-            break
-        time.sleep(1)
-    
-    conexao.scan_registradores()
-    log.info("Scan completo. Encerrando...")
-    break
+# Exemplo: Se horímetro estiver em 3 registradores BCD
+dados["horimetro_horas"] = bcd_to_int(reg_horas)      # 285
+dados["horimetro_minutos"] = bcd_to_int(reg_minutos)  # 30
+dados["horimetro_segundos"] = bcd_to_int(reg_segundos) # 15
 ```
 
----
+### Parte 3: Atualizar Edge Function
+
+Modificar `modbus-receiver/index.ts` para aceitar e salvar os novos campos:
+
+```typescript
+interface ModbusReading {
+  // ... campos existentes ...
+  horimetro_horas?: number;
+  horimetro_minutos?: number;
+  horimetro_segundos?: number;
+}
+
+// Na inserção:
+horimetro_horas: reading.horimetro_horas,
+horimetro_minutos: reading.horimetro_minutos,
+horimetro_segundos: reading.horimetro_segundos,
+```
+
+### Parte 4: Atualizar Dashboard
+
+Criar função helper para formatar e exibir corretamente:
+
+```typescript
+// src/lib/formatters.ts
+export function formatHorimetro(
+  horas: number, 
+  minutos: number, 
+  segundos: number
+): string {
+  const h = String(horas).padStart(5, '0');
+  const m = String(minutos).padStart(2, '0');
+  const s = String(segundos).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+// Resultado: "00285:30:15"
+```
+
+No Dashboard.tsx:
+```tsx
+<MetricCard
+  label="Horas Trabalhadas"
+  value={formatHorimetro(
+    readings.horimetro_horas ?? 0,
+    readings.horimetro_minutos ?? 0,
+    readings.horimetro_segundos ?? 0
+  )}
+  icon={<Clock className="w-5 h-5" />}
+/>
+```
+
+## Pré-Requisito: Descobrir Registradores Corretos
+
+Antes de implementar, você precisa rodar o scan v2.4.1 com sucesso:
+
+1. Copiar o script completo para a VPS (1036 linhas)
+2. Parar o serviço: `sudo systemctl stop gmg-lovable`
+3. Rodar: `python3 /root/gmg-lovable/vps-modbus-reader.py --scan`
+4. Aguardar HF2211 conectar (10-30 segundos)
+5. Analisar os 64 registradores buscando valor ~285
+
+O scan vai mostrar candidatos a horímetro com interpretação BCD. Uma vez identificado, atualizamos o script VPS e implementamos este plano.
 
 ## Arquivos a Modificar
 
 | Arquivo | Alteração |
 |---------|-----------|
-| `docs/vps-modbus-reader.py` | Linha ~405: Adicionar log de "sem conexão" |
-| `docs/vps-modbus-reader.py` | Linha ~809: Aguardar conexão antes do scan |
+| `migration` | Adicionar 3 colunas (horas, minutos, segundos) |
+| `supabase/functions/modbus-receiver/index.ts` | Aceitar novos campos |
+| `docs/vps-modbus-reader.py` | Ler registradores corretos |
+| `src/hooks/useRealtimeReadings.ts` | Incluir novos campos na interface |
+| `src/lib/formatters.ts` | Nova função `formatHorimetro()` |
+| `src/pages/Dashboard.tsx` | Usar formatador |
 
----
+## Resultado Esperado
 
-## Fluxo Corrigido
-
-```text
-1. Script inicia servidor TCP na porta 15002
-2. Script exibe "Aguardando HF2211 conectar para iniciar scan..."
-3. HF2211 reconecta (~10-20 segundos após porta ficar disponível)
-4. Script exibe "HF2211 conectado de (IP)"
-5. Script executa scan_registradores() com 4 blocos de 16 regs
-6. Resultado: 64 registradores lidos com interpretação BCD
-```
-
----
-
-## Após a Correção
-
-Depois de aplicar as correções e rodar o scan:
-
-```bash
-# Na VPS
-sudo systemctl stop gmg-lovable
-python3 /root/gmg-lovable/vps-modbus-reader.py --scan
-```
-
-Você verá:
-```
-Servidor TCP iniciado na porta 15002
-Aguardando HF2211 conectar para iniciar scan...
-HF2211 conectado de ('200.129.129.2', 5663)
-=== MODO SCAN EXTENDIDO v2.4.0 ===
->>> BLOCO 1: 0x0000-0x000F
-  0x0000:      0 (0x0000)  BCD=00:00  HHMM=  0h00m
-  0x0001:    219 (0x00DB)  BCD=00:DB  HHMM=  2h19m
-  ... (64 registradores)
-=== ANÁLISE: BUSCANDO HORÍMETRO 285:30h ===
-CANDIDATOS A HORÍMETRO:
-  0x00XX: 285 (horas_direto)
-```
-
----
-
-## Seção Técnica
-
-### Por que o HF2211 não conectou a tempo?
-
-1. Quando você para o serviço `gmg-lovable`, a conexão TCP é fechada
-2. O HF2211 detecta a desconexão e entra em modo de reconexão
-3. O HF2211 tipicamente demora 10-30 segundos para tentar reconectar
-4. O script v2.4.0 não estava esperando essa reconexão
-
-### Timeout do Servidor
-
-O `socket_servidor.settimeout(5.0)` na linha 193 faz com que `accept()` bloqueie por apenas 5 segundos. Se o HF2211 não conectar nesse tempo, retorna `False` e o script deveria tentar novamente - mas o código de scan não estava respeitando esse loop.
+Após implementação:
+- Visor físico: `00285:30:15`
+- Dashboard: `00285:30:15`
+- Banco de dados: `horimetro_horas=285, horimetro_minutos=30, horimetro_segundos=15`
