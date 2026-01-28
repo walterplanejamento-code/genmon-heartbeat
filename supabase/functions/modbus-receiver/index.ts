@@ -27,6 +27,11 @@ interface ModbusReading {
   gmg_alimentando?: boolean;
   aviso_ativo?: boolean;
   falha_ativa?: boolean;
+  
+  // Horímetro separado em campos (formato: HHHHH:MM:SS)
+  horimetro_horas?: number;
+  horimetro_minutos?: number;
+  horimetro_segundos?: number;
 }
 
 interface AlertParam {
@@ -171,6 +176,10 @@ Deno.serve(async (req) => {
           gmg_alimentando: reading.gmg_alimentando,
           aviso_ativo: reading.aviso_ativo,
           falha_ativa: reading.falha_ativa,
+          // Novos campos do horímetro separados
+          horimetro_horas: reading.horimetro_horas,
+          horimetro_minutos: reading.horimetro_minutos,
+          horimetro_segundos: reading.horimetro_segundos,
         })
         .select()
         .single();

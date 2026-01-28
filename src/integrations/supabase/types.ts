@@ -194,6 +194,9 @@ export type Database = {
           gerador_id: string
           gmg_alimentando: boolean | null
           horas_trabalhadas: number | null
+          horimetro_horas: number | null
+          horimetro_minutos: number | null
+          horimetro_segundos: number | null
           id: string
           motor_funcionando: boolean | null
           nivel_combustivel: number | null
@@ -216,6 +219,9 @@ export type Database = {
           gerador_id: string
           gmg_alimentando?: boolean | null
           horas_trabalhadas?: number | null
+          horimetro_horas?: number | null
+          horimetro_minutos?: number | null
+          horimetro_segundos?: number | null
           id?: string
           motor_funcionando?: boolean | null
           nivel_combustivel?: number | null
@@ -238,6 +244,9 @@ export type Database = {
           gerador_id?: string
           gmg_alimentando?: boolean | null
           horas_trabalhadas?: number | null
+          horimetro_horas?: number | null
+          horimetro_minutos?: number | null
+          horimetro_segundos?: number | null
           id?: string
           motor_funcionando?: boolean | null
           nivel_combustivel?: number | null

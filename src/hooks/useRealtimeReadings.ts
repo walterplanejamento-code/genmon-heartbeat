@@ -23,6 +23,10 @@ export interface Reading {
   aviso_ativo: boolean;
   falha_ativa: boolean;
   created_at: string;
+  // Horímetro separado em campos (formato: HHHHH:MM:SS)
+  horimetro_horas: number | null;
+  horimetro_minutos: number | null;
+  horimetro_segundos: number | null;
 }
 
 export interface Alert {
