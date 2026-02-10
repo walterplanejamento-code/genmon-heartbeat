@@ -1,53 +1,50 @@
 
-# Plano: Corrigir Exibição de Horas Trabalhadas (Formato 00285:30:15)
 
-## ✅ IMPLEMENTADO COMPLETO
+# Plano: Atualizar Configuração da VPS no Sistema
 
-### Parte 1: Schema do Banco de Dados ✅
-Colunas adicionadas em `leituras_tempo_real`:
-- `horimetro_horas` (integer)
-- `horimetro_minutos` (integer)  
-- `horimetro_segundos` (integer)
+## Problema Atual
 
-### Parte 2: Edge Function ✅
-Arquivo: `supabase/functions/modbus-receiver/index.ts`
-- Interface `ModbusReading` expandida com novos campos
-- Inserção no banco inclui os 3 campos
+A pagina de VPS e os dados no banco estao desatualizados e inconsistentes com a configuracao real do sistema:
 
-### Parte 3: Frontend ✅
-Arquivos modificados:
-- `src/lib/formatters.ts` - Nova função `formatHorimetro()`
-- `src/hooks/useRealtimeReadings.ts` - Interface `Reading` expandida
-- `src/pages/Dashboard.tsx` - Exibe no formato `00285:00:00`
+| Campo | Valor no Sistema | Valor Real |
+|-------|-----------------|------------|
+| IP VPS | 45.33.100.50 (default) | 82.25.70.90 |
+| Porta | 502 (default) / 1502 (banco) | 15002 |
+| Provider | Linode | Contabo (ou outro) |
+| Hostname | gen-monitor-vps | 7arrowsServe |
 
-### Parte 4: VPS Script v2.5.0 ✅
-Arquivo: `docs/vps-modbus-reader.py`
-Alterações:
-- Bloco 1 expandido: 0x0000-0x000B (12 registradores)
-- Horímetro confirmado em 0x000B (horas inteiras)
-- Bloco 2 reduzido: 0x0010-0x0013 (4 registradores)
-- Envia: `horimetro_horas`, `horimetro_minutos=0`, `horimetro_segundos=0`
+Alem disso, o horimetro ainda mostra 0 no banco, indicando que o script v2.5.0 pode nao estar mapeando corretamente o registrador 0x000B para o campo `horimetro_horas`.
 
-## Próximo Passo
+## O que sera feito
 
-Copiar o script v2.5.0 para a VPS e reiniciar o serviço:
+### 1. Corrigir dados da VPS no banco
+Atualizar o registro em `vps_conexoes` com os valores corretos:
+- IP: `82.25.70.90`
+- Porta: `15002`
+- Hostname: `7arrowsServe`
 
-```bash
-# Na VPS
-rm /root/gmg-lovable/vps-modbus-reader.py
-nano /root/gmg-lovable/vps-modbus-reader.py
-# Colar conteúdo do arquivo docs/vps-modbus-reader.py
+### 2. Atualizar defaults da pagina VPS
+Arquivo: `src/pages/VPS.tsx`
+- Alterar defaults do formulario para refletir a configuracao real (IP `82.25.70.90`, porta `15002`)
+- Remover referencia a "Linode"
 
-# Verificar
-wc -l /root/gmg-lovable/vps-modbus-reader.py  # Esperado: ~1000+ linhas
+### 3. Investigar e corrigir horimetro zerado
+O script v2.5.0 deveria enviar `horimetro_horas` com o valor do registrador 0x000B (~284), mas os dados no banco mostram 0. Vou:
+- Revisar o script `docs/vps-modbus-reader.py` para verificar se o mapeamento do registrador 0x000B esta correto no codigo de extracao (nao apenas na definicao)
+- Corrigir qualquer problema encontrado na logica de parsing
 
-# Reiniciar
-sudo systemctl restart gmg-lovable
-sudo systemctl status gmg-lovable
-```
+### 4. Adicionar validacao real da VPS (opcional)
+Atualmente, o botao "Validar" na pagina VPS apenas simula uma validacao com `setTimeout`. Posso criar uma edge function que faca um teste real verificando se ha leituras recentes no banco para aquele gerador.
 
-## Resultado Esperado
+---
 
-- Visor físico: `00285:30:15`
-- Dashboard: `00284:00:00` (horas corretas, minutos/segundos zerados por enquanto)
-- Banco de dados: `horimetro_horas=284, horimetro_minutos=0, horimetro_segundos=0`
+## Detalhes Tecnicos
+
+### Arquivos modificados:
+- `src/pages/VPS.tsx` - Defaults do formulario
+- `docs/vps-modbus-reader.py` - Verificar/corrigir mapeamento do horimetro
+- `supabase/functions/modbus-receiver/index.ts` - Verificar se os campos estao sendo inseridos
+
+### Migracao de dados:
+- UPDATE na tabela `vps_conexoes` para corrigir IP e porta
+
