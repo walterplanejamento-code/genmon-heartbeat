@@ -5,8 +5,6 @@ import { AlertBadge } from "@/components/ui/AlertBadge";
 import { useRealtimeReadings, useRealtimeAlerts } from "@/hooks/useRealtimeReadings";
 import { useGenerator } from "@/hooks/useGenerator";
 import { useAuth } from "@/hooks/useAuth";
-import { useNavigate } from "react-router-dom";
-import { useEffect } from "react";
 import { formatHorimetro, horasDecimaisParaFormato } from "@/lib/formatters";
 import {
   Zap,
@@ -21,17 +19,10 @@ import {
 } from "lucide-react";
 
 export default function Dashboard() {
-  const { user, isLoading: authLoading } = useAuth();
-  const navigate = useNavigate();
+  const { isLoading: authLoading } = useAuth();
   const { generator, isLoading: generatorLoading } = useGenerator();
   const { latestReading, isConnected } = useRealtimeReadings(generator?.id || null);
   const { alerts } = useRealtimeAlerts(generator?.id || null);
-
-  useEffect(() => {
-    if (!authLoading && !user) {
-      navigate("/login");
-    }
-  }, [user, authLoading, navigate]);
 
   if (authLoading || generatorLoading) {
     return (
