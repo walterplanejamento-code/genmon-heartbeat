@@ -126,31 +126,34 @@ export function useVPSConnection(geradorId: string | null) {
   }, [toast]);
 
   const validateConnection = useCallback(async () => {
-    if (!connection?.id) return false;
+    if (!geradorId) return false;
 
     setIsSaving(true);
     try {
-      // Simulate validation - in production this would ping the VPS
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      const { data, error: invokeError } = await supabase.functions.invoke("validate-vps", {
+        body: { gerador_id: geradorId },
+      });
 
-      const { error: updateError } = await supabase
-        .from("vps_conexoes")
-        .update({
-          validado: true,
-          ultima_validacao: new Date().toISOString(),
-          latencia_ms: Math.floor(Math.random() * 50) + 10,
-        })
-        .eq("id", connection.id);
+      if (invokeError) throw invokeError;
 
-      if (updateError) throw updateError;
+      const result = data as {
+        validado: boolean;
+        checks: {
+          dados_recentes: { ok: boolean; leituras_5min: number; descricao: string };
+          equipamento_hf: { ok: boolean; status: string };
+          ultima_leitura: { timestamp: string | null; idade_segundos: number | null };
+        };
+        latencia_estimada_s: number | null;
+      };
 
       toast({
-        title: "Validação concluída",
-        description: "A conexão com a VPS foi validada com sucesso.",
+        title: result.validado ? "VPS Validada ✓" : "VPS sem dados recentes",
+        description: result.checks.dados_recentes.descricao,
+        variant: result.validado ? "default" : "destructive",
       });
 
       await fetchConnection();
-      return true;
+      return result.validado;
     } catch (err) {
       console.error("Error validating VPS connection:", err);
       toast({
@@ -162,7 +165,7 @@ export function useVPSConnection(geradorId: string | null) {
     } finally {
       setIsSaving(false);
     }
-  }, [connection?.id, fetchConnection, toast]);
+  }, [geradorId, fetchConnection, toast]);
 
   useEffect(() => {
     fetchConnection();
