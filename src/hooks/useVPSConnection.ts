@@ -98,10 +98,10 @@ export function useVPSConnection(geradorId: string | null) {
         .from("vps_conexoes")
         .insert({
           gerador_id: geradorId,
-          ip_fixo: config.ip_fixo || "45.33.100.50",
-          porta: config.porta || "502",
-          hostname: config.hostname || "gen-monitor-vps",
-          provider: config.provider || "Linode",
+          ip_fixo: config.ip_fixo || "82.25.70.90",
+          porta: config.porta || "15002",
+          hostname: config.hostname || "7arrowsServe",
+          provider: config.provider || "Contabo",
         })
         .select()
         .single();

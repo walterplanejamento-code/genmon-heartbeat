@@ -21,10 +21,10 @@ export default function VPS() {
   } = useVPSConnection(generator?.id || null);
 
   const [config, setConfig] = useState({
-    ipFixo: "45.33.100.50",
-    porta: "502",
-    hostname: "gen-monitor-vps",
-    provider: "Linode",
+    ipFixo: "82.25.70.90",
+    porta: "15002",
+    hostname: "7arrowsServe",
+    provider: "Contabo",
   });
 
   const [isValidating, setIsValidating] = useState(false);
@@ -33,10 +33,10 @@ export default function VPS() {
   useEffect(() => {
     if (connection) {
       setConfig({
-        ipFixo: connection.ip_fixo || "45.33.100.50",
-        porta: connection.porta || "502",
-        hostname: connection.hostname || "gen-monitor-vps",
-        provider: connection.provider || "Linode",
+        ipFixo: connection.ip_fixo || "82.25.70.90",
+        porta: connection.porta || "15002",
+        hostname: connection.hostname || "7arrowsServe",
+        provider: connection.provider || "Contabo",
       });
     }
   }, [connection]);
