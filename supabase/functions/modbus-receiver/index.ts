@@ -1,15 +1,21 @@
 import { createClient } from "@supabase/supabase-js";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-api-key",
-};
+const ALLOWED_ORIGINS = [
+  "https://hwloajvxjsysutqfqpal.supabase.co",
+  "https://genmonitor.lovable.app",
+];
+
+function getCorsHeaders(req: Request) {
+  const origin = req.headers.get("origin") || "";
+  const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-api-key",
+  };
+}
 
 interface ModbusReading {
-  // Identificação do gerador pela porta da VPS
   porta_vps: string;
-  
-  // Leituras Modbus
   tensao_rede_rs?: number;
   tensao_rede_st?: number;
   tensao_rede_tr?: number;
@@ -27,8 +33,6 @@ interface ModbusReading {
   gmg_alimentando?: boolean;
   aviso_ativo?: boolean;
   falha_ativa?: boolean;
-  
-  // Horímetro separado em campos (formato: HHHHH:MM:SS)
   horimetro_horas?: number;
   horimetro_minutos?: number;
   horimetro_segundos?: number;
@@ -42,33 +46,85 @@ interface AlertParam {
   habilitado: boolean;
 }
 
+function isValidNumber(val: unknown): val is number {
+  return typeof val === "number" && !isNaN(val) && isFinite(val);
+}
+
+function sanitizeReading(reading: ModbusReading): ModbusReading {
+  const sanitized: ModbusReading = { porta_vps: String(reading.porta_vps).trim() };
+  const numericFields = [
+    "tensao_rede_rs", "tensao_rede_st", "tensao_rede_tr", "tensao_gmg",
+    "corrente_fase1", "frequencia_gmg", "rpm_motor", "temperatura_agua",
+    "tensao_bateria", "horas_trabalhadas", "numero_partidas", "nivel_combustivel",
+    "horimetro_horas", "horimetro_minutos", "horimetro_segundos",
+  ] as const;
+  for (const field of numericFields) {
+    if (reading[field] !== undefined && isValidNumber(reading[field])) {
+      (sanitized as Record<string, unknown>)[field] = reading[field];
+    }
+  }
+  const boolFields = [
+    "motor_funcionando", "rede_ok", "gmg_alimentando", "aviso_ativo", "falha_ativa",
+  ] as const;
+  for (const field of boolFields) {
+    if (reading[field] !== undefined) {
+      (sanitized as Record<string, unknown>)[field] = Boolean(reading[field]);
+    }
+  }
+  return sanitized;
+}
+
+function authenticateRequest(req: Request): boolean {
+  const apiKey = req.headers.get("x-api-key");
+  const expectedKey = Deno.env.get("MODBUS_API_KEY");
+
+  // If no MODBUS_API_KEY is configured, fall back to checking the Supabase anon key
+  if (!expectedKey) {
+    const authHeader = req.headers.get("authorization");
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    if (authHeader && anonKey) {
+      return authHeader === `Bearer ${anonKey}`;
+    }
+    // If neither key is set, reject - secure by default
+    return false;
+  }
+
+  return apiKey === expectedKey;
+}
+
 Deno.serve(async (req) => {
-  // Handle CORS preflight
+  const corsHeaders = getCorsHeaders(req);
+
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
+  }
+
+  // Authenticate the request
+  if (!authenticateRequest(req)) {
+    return new Response(
+      JSON.stringify({ error: "Unauthorized" }),
+      { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    
-    // Create Supabase client with service role for inserting data
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     if (req.method === "POST") {
-      const reading: ModbusReading = await req.json();
-      
-      console.log("Received Modbus reading:", JSON.stringify(reading));
+      const rawReading: ModbusReading = await req.json();
 
-      // Validate required field - porta_vps identifica o gerador
-      if (!reading.porta_vps) {
+      if (!rawReading.porta_vps) {
         return new Response(
-          JSON.stringify({ error: "porta_vps is required to identify the generator" }),
+          JSON.stringify({ error: "porta_vps is required" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
-      // Find generator by VPS port via equipamentos_hf
+      const reading = sanitizeReading(rawReading);
+
+      // Find generator by VPS port
       let { data: equipamentoHF, error: hfError } = await supabase
         .from("equipamentos_hf")
         .select("gerador_id, geradores(id, marca, modelo)")
@@ -78,19 +134,15 @@ Deno.serve(async (req) => {
       if (hfError) {
         console.error("Error finding HF equipment:", hfError);
         return new Response(
-          JSON.stringify({ error: "Database error finding equipment", details: hfError }),
+          JSON.stringify({ error: "Failed to find equipment" }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
-      // Auto-provision generator and HF equipment if not found
+      // Auto-provision generator if not found
       if (!equipamentoHF) {
-        console.log(`Auto-provisioning generator for VPS port: ${reading.porta_vps}`);
-        
-        // Create a system user ID for auto-provisioned generators
         const systemUserId = "00000000-0000-0000-0000-000000000000";
-        
-        // Create the generator
+
         const { data: newGerador, error: geradorError } = await supabase
           .from("geradores")
           .insert({
@@ -109,21 +161,18 @@ Deno.serve(async (req) => {
         if (geradorError) {
           console.error("Error creating generator:", geradorError);
           return new Response(
-            JSON.stringify({ error: "Failed to auto-provision generator", details: geradorError }),
+            JSON.stringify({ error: "Failed to auto-provision generator" }),
             { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
 
-        console.log(`Created generator: ${newGerador.id}`);
-
-        // Create the HF equipment
-        const { data: newHF, error: hfCreateError } = await supabase
+        const { error: hfCreateError } = await supabase
           .from("equipamentos_hf")
           .insert({
             gerador_id: newGerador.id,
             modelo: "HF2211",
             porta_vps: reading.porta_vps,
-            ip_vps: "82.25.70.90",
+            ip_vps: Deno.env.get("DEFAULT_VPS_IP") || "0.0.0.0",
             porta_tcp_local: "502",
             endereco_modbus: "001",
             status: "online",
@@ -134,27 +183,23 @@ Deno.serve(async (req) => {
         if (hfCreateError) {
           console.error("Error creating HF equipment:", hfCreateError);
           return new Response(
-            JSON.stringify({ error: "Failed to create HF equipment", details: hfCreateError }),
+            JSON.stringify({ error: "Failed to create HF equipment" }),
             { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
 
-        console.log(`Created HF equipment: ${newHF.id} for port ${reading.porta_vps}`);
-        
-        // Use the newly created equipment
         equipamentoHF = { gerador_id: newGerador.id, geradores: newGerador };
       }
 
       const geradorId = equipamentoHF.gerador_id;
-      console.log(`Using generator ${geradorId} for VPS port ${reading.porta_vps}`);
 
-      // Update HF equipment status to online
+      // Update HF equipment status
       await supabase
         .from("equipamentos_hf")
         .update({ status: "online", updated_at: new Date().toISOString() })
         .eq("porta_vps", reading.porta_vps);
 
-      // Insert the reading
+      // Insert reading
       const { data: leitura, error: leituraError } = await supabase
         .from("leituras_tempo_real")
         .insert({
@@ -176,7 +221,6 @@ Deno.serve(async (req) => {
           gmg_alimentando: reading.gmg_alimentando,
           aviso_ativo: reading.aviso_ativo,
           falha_ativa: reading.falha_ativa,
-          // Novos campos do horímetro separados
           horimetro_horas: reading.horimetro_horas,
           horimetro_minutos: reading.horimetro_minutos,
           horimetro_segundos: reading.horimetro_segundos,
@@ -187,14 +231,12 @@ Deno.serve(async (req) => {
       if (leituraError) {
         console.error("Error inserting reading:", leituraError);
         return new Response(
-          JSON.stringify({ error: "Failed to insert reading", details: leituraError }),
+          JSON.stringify({ error: "Failed to insert reading" }),
           { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
-      console.log("Reading inserted successfully:", leitura.id);
-
-      // Check alert parameters and generate alerts
+      // Check alert parameters
       const { data: alertParams, error: alertError } = await supabase
         .from("parametros_alerta")
         .select("*")
@@ -225,7 +267,7 @@ Deno.serve(async (req) => {
 
         for (const param of alertParams as AlertParam[]) {
           const value = parameterMap[param.parametro];
-          
+
           if (value !== undefined) {
             let alertMessage: string | null = null;
 
@@ -247,7 +289,6 @@ Deno.serve(async (req) => {
           }
         }
 
-        // Check status bits for alerts
         if (reading.aviso_ativo) {
           alertsToInsert.push({
             gerador_id: geradorId,
@@ -268,7 +309,6 @@ Deno.serve(async (req) => {
           });
         }
 
-        // Insert all alerts
         if (alertsToInsert.length > 0) {
           const { error: insertAlertError } = await supabase
             .from("alertas")
@@ -276,24 +316,22 @@ Deno.serve(async (req) => {
 
           if (insertAlertError) {
             console.error("Error inserting alerts:", insertAlertError);
-          } else {
-            console.log(`Inserted ${alertsToInsert.length} alerts`);
           }
         }
       }
 
       return new Response(
-        JSON.stringify({ 
-          success: true, 
+        JSON.stringify({
+          success: true,
           gerador_id: geradorId,
           reading_id: leitura.id,
-          timestamp: leitura.created_at 
+          timestamp: leitura.created_at,
         }),
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // GET method - return latest reading for a generator by VPS port
+    // GET - latest reading
     if (req.method === "GET") {
       const url = new URL(req.url);
       const portaVps = url.searchParams.get("porta_vps");
@@ -308,7 +346,6 @@ Deno.serve(async (req) => {
 
       let targetGeradorId = geradorId;
 
-      // If porta_vps provided, find the generator
       if (portaVps && !geradorId) {
         const { data: equipamentoHF } = await supabase
           .from("equipamentos_hf")
@@ -318,7 +355,7 @@ Deno.serve(async (req) => {
 
         if (!equipamentoHF) {
           return new Response(
-            JSON.stringify({ error: `No generator found for VPS port ${portaVps}` }),
+            JSON.stringify({ error: "Generator not found" }),
             { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
@@ -351,12 +388,11 @@ Deno.serve(async (req) => {
       JSON.stringify({ error: "Method not allowed" }),
       { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
-
   } catch (error) {
     console.error("Unexpected error:", error);
     return new Response(
-      JSON.stringify({ error: "Internal server error", details: String(error) }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      JSON.stringify({ error: "Internal server error" }),
+      { status: 500, headers: { ...getCorsHeaders(req), "Content-Type": "application/json" } }
     );
   }
 });
