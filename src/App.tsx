@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/hooks/useAuth";
+import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Generator from "./pages/Generator";
@@ -27,14 +28,14 @@ const App = () => (
           <Routes>
             <Route path="/" element={<Navigate to="/login" replace />} />
             <Route path="/login" element={<Login />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/generator" element={<Generator />} />
-            <Route path="/hf-equipment" element={<HFEquipment />} />
-            <Route path="/vps" element={<VPS />} />
-            <Route path="/alerts" element={<Alerts />} />
-            <Route path="/manuals" element={<Manuals />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="/diagnostics" element={<Diagnostics />} />
+            <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+            <Route path="/generator" element={<ProtectedRoute><Generator /></ProtectedRoute>} />
+            <Route path="/hf-equipment" element={<ProtectedRoute><HFEquipment /></ProtectedRoute>} />
+            <Route path="/vps" element={<ProtectedRoute><VPS /></ProtectedRoute>} />
+            <Route path="/alerts" element={<ProtectedRoute><Alerts /></ProtectedRoute>} />
+            <Route path="/manuals" element={<ProtectedRoute><Manuals /></ProtectedRoute>} />
+            <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+            <Route path="/diagnostics" element={<ProtectedRoute><Diagnostics /></ProtectedRoute>} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
